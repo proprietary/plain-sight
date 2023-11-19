@@ -8,12 +8,18 @@
 #include <fstream>
 #include <iostream>
 
+extern "C" {
+#include <libavformat/avformat.h>
+}
+
 TEST(VideoGeneratorTest, SmokeTest) { ASSERT_EQ(true, true); }
 
 TEST(VideoGeneratorTest, CheckFile) {
   std::filesystem::path path{"/usr/include/pthread.h"};
   ASSERT_TRUE(std::filesystem::exists(path));
 }
+
+#include <libavformat/avformat.h>
 
 TEST(VideoGeneratorTest, FromSomeFile) {
   // read file to bytes
@@ -24,11 +30,22 @@ TEST(VideoGeneratorTest, FromSomeFile) {
   // split bytes into frames
   std::vector<qrcodegen::QrCode> qr_codes =
       net_zelcon::plain_sight::split_frames(bytes);
-  // generate video
-  net_zelcon::plain_sight::write_qr_codes(qr_codes);
-  // check output file
+  // output file
   std::filesystem::path output_path{"/tmp/output.mp4"};
+  // generate video
+  net_zelcon::plain_sight::write_qr_codes(qr_codes, output_path);
   // check file size
   ASSERT_TRUE(std::filesystem::exists(output_path));
   ASSERT_GT(std::filesystem::file_size(output_path), 0);
+  // check if video has frames using libav
+  AVFormatContext* format_context = nullptr;
+  int result = avformat_open_input(&format_context, output_path.c_str(), nullptr, nullptr);
+  ASSERT_EQ(result, 0);
+  result = avformat_find_stream_info(format_context, nullptr);
+  ASSERT_EQ(result, 0);
+  int num_frames = format_context->streams[0]->nb_frames;
+  ASSERT_GT(num_frames, 0);
+  // teardown
+  avformat_close_input(&format_context);
+  std::filesystem::remove(output_path);
 }
