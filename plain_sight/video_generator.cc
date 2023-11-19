@@ -14,14 +14,13 @@ extern "C" {
 #include <iostream>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 #include <qrcodegen.hpp>
 
 namespace net_zelcon::plain_sight {
 
-void stuff() {}
-
-void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes) {
+void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes, std::filesystem::path output_path) {
   if (qr_codes.size() < 1)
     return;
 
@@ -40,22 +39,21 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes) {
   }
 
   // Open output file
-  std::string outputFilename = "/tmp/output.mp4";
   AVFormatContext *format_context = nullptr;
   if (avformat_alloc_output_context2(&format_context, nullptr, nullptr,
-                                     outputFilename.c_str()) < 0) {
+                                     output_path.c_str()) < 0) {
     std::cerr << "Error creating output context" << std::endl;
     return;
   }
 
   const AVOutputFormat *output_format =
-      av_guess_format(nullptr, outputFilename.c_str(), nullptr);
+      av_guess_format(nullptr, output_path.c_str(), nullptr);
   if (output_format == nullptr) {
     std::cerr << "Error guessing output format" << std::endl;
     return;
   }
 
-  if (avio_open(&format_context->pb, outputFilename.c_str(),
+  if (avio_open(&format_context->pb, output_path.c_str(),
                 AVIO_FLAG_READ_WRITE) < 0) {
     std::cerr << "Error opening output file" << std::endl;
     return;
@@ -150,8 +148,8 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes) {
         // Convert QR Code image to YUV420P format
         const bool pixel_set = qr_code.getModule(x, y);
         pFrame->data[0][y * pFrame->linesize[0] + x] = pixel_set ? 0 : 255; // Y
-        pFrame->data[1][y * pFrame->linesize[1] + x] = 0;                   // U
-        pFrame->data[2][y * pFrame->linesize[2] + x] = 0;                   // V
+        pFrame->data[1][y/2 * pFrame->linesize[1] + x/2] = 128;                 // U
+        pFrame->data[2][y/2 * pFrame->linesize[2] + x/2] = 128;                 // V
       }
     }
 
@@ -206,7 +204,7 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes) {
 
   // Clean up resources
   // Free the packet
-  //av_packet_unref(pkt);
+  av_packet_unref(pkt);
   // Free the YUV frame
   if (pFrame)
     av_frame_free(&pFrame);
