@@ -1,20 +1,12 @@
 #ifndef _INCLUDE_VIDEO_GENERATOR_H_
 #define _INCLUDE_VIDEO_GENERATOR_H_
 
-#include <vector>
 #include <cstdint>
-
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
+#include <qrcodegen.hpp>
+#include <vector>
 
 namespace net_zelcon::plain_sight {
-    struct QRCodeFrame {
-        std::vector<uint8_t> data;
-        uint64_t width;
-        uint64_t height;
-    };
+void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes);
 }
-
 
 #endif // _INCLUDE_VIDEO_GENERATOR_H_
