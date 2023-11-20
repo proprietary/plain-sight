@@ -31,6 +31,7 @@ target_link_libraries(
     plain_sight
     PUBLIC
     com_github_nayuki_QRCodeGenerator
+    glog::glog
     PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL PkgConfig::SWSCALE
 )
 
