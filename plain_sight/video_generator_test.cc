@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <iostream>
 
 extern "C" {
@@ -51,18 +52,18 @@ TEST(VideoGeneratorTest, FromSomeFile) {
 }
 
 TEST(VideoGeneratorTest, EndToEnd) {
-    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> text;
     std::filesystem::path path{"/usr/include/pthread.h"};
     ASSERT_TRUE(std::filesystem::exists(path));
-    net_zelcon::plain_sight::read_file(bytes, path);
+    net_zelcon::plain_sight::read_file(text, path);
     std::filesystem::path output_path{"/tmp/output.mp4"};
-    auto qr_codes = net_zelcon::plain_sight::split_frames(bytes);
+    auto qr_codes = net_zelcon::plain_sight::split_frames(text);
     net_zelcon::plain_sight::write_qr_codes(qr_codes, output_path);
     ASSERT_GT(std::filesystem::file_size(output_path), 0);
     std::vector<std::uint8_t> decoded_bytes;
     net_zelcon::plain_sight::decode(decoded_bytes, output_path);
-    ASSERT_EQ(decoded_bytes.size(), bytes.size());
-    ASSERT_EQ(decoded_bytes, bytes);
+    ASSERT_EQ(decoded_bytes.size(), text.size());
+    ASSERT_TRUE(std::memcmp(decoded_bytes.data(), text.data(), text.size()) == 0);
     // teardown
-    std::filesystem::remove(output_path);
+    //std::filesystem::remove(output_path);
 }

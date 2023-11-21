@@ -28,16 +28,11 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     av_log_set_level(AV_LOG_DEBUG);
 
     // Get maximal size of QR Codes
-    const auto max_size = std::max_element(
-        qr_codes.begin(), qr_codes.end(),
-        [](const qrcodegen::QrCode &a, const qrcodegen::QrCode &b) -> bool {
-            return a.getSize() < b.getSize();
-        });
-    assert(max_size != qr_codes.cend());
-    auto max_size_value = max_size->getSize();
-    if (max_size_value % 2 > 0) {
+    const auto qr_code_size = qr_codes[0].getSize();
+    constexpr auto border = 8;
+    auto max_size_value = qr_code_size + border * 2;
+    while (max_size_value % 2 != 0)
         max_size_value++;
-    }
 
     // Open output file
     AVFormatContext *format_context = nullptr;
@@ -82,7 +77,7 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     codec_context->height = max_size_value; // Set your desired video height
     // frame rate
     codec_context->time_base =
-        AVRational{.num = 1, .den = 25}; // Set your desired frame rate
+        AVRational{.num = 1, .den = 20}; // Set your desired frame rate
     codec_context->gop_size = 1;
     codec_context->max_b_frames = 1;
 
@@ -113,20 +108,21 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     }
 
     // Create video frame
-    AVFrame *pFrame = av_frame_alloc();
-    if (!pFrame) {
+    AVFrame *video_frame = av_frame_alloc();
+    if (!video_frame) {
         std::cerr << "Error allocating video frame" << std::endl;
         return;
     }
 
     // Set frame parameters
-    pFrame->width = max_size_value;
-    pFrame->height = max_size_value;
-    pFrame->format = AV_PIX_FMT_YUV420P;
+    video_frame->width = max_size_value;
+    video_frame->height = max_size_value;
+    video_frame->format = AV_PIX_FMT_YUV420P;
 
     // allocate framebuffer
-    int sz = av_image_alloc(pFrame->data, pFrame->linesize, pFrame->width,
-                            pFrame->height, AV_PIX_FMT_YUV420P, 1);
+    int sz = av_image_alloc(video_frame->data, video_frame->linesize,
+                            video_frame->width, video_frame->height,
+                            AV_PIX_FMT_YUV420P, 1);
     if (sz < 0) {
         std::cerr << "Error allocating frame buffer" << std::endl;
         return;
@@ -144,28 +140,46 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     for (const auto &qr_code : qr_codes) {
 
         // Generate QR Code image
-        for (int y = 0; y < qr_code.getSize(); y++) {
-            for (int x = 0; x < qr_code.getSize(); x++) {
+        for (int row = 0; row < max_size_value; row++) {
+            const int y = row - border;
+            for (int col = 0; col < max_size_value; col++) {
+                const bool is_border = row < border || col < border ||
+                                       row >= max_size_value - border ||
+                                       col >= max_size_value - border;
+                if (is_border) {
+                    video_frame->data[0][row * video_frame->linesize[0] + col] =
+                        255; // Y
+                    video_frame->data[1][row / 2 * video_frame->linesize[1] +
+                                         col / 2] = 128; // U
+                    video_frame->data[2][row / 2 * video_frame->linesize[2] +
+                                         col / 2] = 128; // V
+                    continue;
+                }
+                const int x = col - border;
+                const bool pixel = qr_code.getModule(x, y);
                 // Convert QR Code image to YUV420P format
-                const bool pixel_set = qr_code.getModule(x, y);
-                pFrame->data[0][y * pFrame->linesize[0] + x] =
-                    pixel_set ? 0 : 255;                                    // Y
-                pFrame->data[1][y / 2 * pFrame->linesize[1] + x / 2] = 128; // U
-                pFrame->data[2][y / 2 * pFrame->linesize[2] + x / 2] = 128; // V
+                video_frame->data[0][row * video_frame->linesize[0] + col] =
+                    pixel ? 0 : 255; // Y
+                video_frame
+                    ->data[1][row / 2 * video_frame->linesize[1] + col / 2] =
+                    128; // U
+                video_frame
+                    ->data[2][row / 2 * video_frame->linesize[2] + col / 2] =
+                    128; // V
             }
         }
 
         // Set the PTS for the frame
-        pFrame->pts = frame_counter++;
+        video_frame->pts = frame_counter++;
 
         // Write video frame
-        size_t sz = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, pFrame->width,
-                                             pFrame->height, 1);
+        size_t sz = av_image_get_buffer_size(
+            AV_PIX_FMT_YUV420P, video_frame->width, video_frame->height, 1);
         if (sz < 0) {
             std::cerr << "Error getting image buffer size" << std::endl;
             return;
         }
-        if (avcodec_send_frame(codec_context, pFrame) < 0) {
+        if (avcodec_send_frame(codec_context, video_frame) < 0) {
             std::cerr << "Error sending frame to codec context" << std::endl;
             return;
         }
@@ -208,8 +222,8 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     // Free the packet
     av_packet_unref(pkt);
     // Free the YUV frame
-    if (pFrame)
-        av_frame_free(&pFrame);
+    if (video_frame)
+        av_frame_free(&video_frame);
     if (codec_context != nullptr)
         avcodec_free_context(&codec_context);
     if (format_context != nullptr && format_context->pb != nullptr &&

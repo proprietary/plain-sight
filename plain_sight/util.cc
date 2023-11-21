@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <sstream>
 
 extern "C" {
   #include <libavutil/error.h>
@@ -22,10 +23,25 @@ void read_file(std::vector<std::uint8_t> &dst, std::filesystem::path path) {
              std::istream_iterator<std::uint8_t>());
 }
 
+void read_file(std::string& dst, const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (file) {
+    file.seekg(0, std::ios::end);
+    std::streampos fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+    dst.resize(fileSize);
+    file.read(&dst[0], fileSize);
+  }
+}
+
 std::string libav_error(int error) {
   std::string output(AV_ERROR_MAX_STRING_SIZE, '\0');
   av_make_error_string(output.data(), AV_ERROR_MAX_STRING_SIZE, error);
   return output;
+}
+
+void AVCodecContextDeleter(AVCodecContext *p) {
+    avcodec_free_context(&p);
 }
 
 } // namespace net_zelcon::plain_sight

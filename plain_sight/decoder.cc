@@ -4,7 +4,6 @@
 #include <glog/logging.h>
 #include <limits>
 #include <memory>
-#include <opencv2/opencv.hpp>
 #include <stdexcept>
 
 extern "C" {
@@ -18,37 +17,50 @@ namespace net_zelcon::plain_sight {
 
 namespace {
 
-auto get_frame_pixels(const AVFrame *frame) -> cv::Mat {
-    SwsContext *sws_ctx = sws_getContext(
-        frame->width, frame->height, static_cast<AVPixelFormat>(frame->format),
-        frame->width, frame->height, AV_PIX_FMT_BGR24, SWS_BILINEAR, nullptr,
-        nullptr, nullptr);
-    if (sws_ctx == nullptr) {
+struct image_buf_t {
+    std::vector<std::uint8_t> buf;
+    int width;
+    int height;
+};
+
+auto get_frame_pixels(image_buf_t &img, const AVFrame *frame) -> void {
+    constexpr auto destination_format = AV_PIX_FMT_BGR8;
+    std::unique_ptr<SwsContext, decltype(&sws_freeContext)> sws_ctx{
+        sws_getContext(frame->width, frame->height,
+                       static_cast<AVPixelFormat>(frame->format), frame->width,
+                       frame->height, destination_format, SWS_BILINEAR, nullptr,
+                       nullptr, nullptr),
+        &sws_freeContext};
+    if (!sws_ctx) {
         throw std::runtime_error{"Could not initialize sws context"};
     }
-    AVFrame *bgr_frame = av_frame_alloc();
-    if (bgr_frame == nullptr) {
+    AVFrame *grayscale_frame = av_frame_alloc();
+    if (grayscale_frame == nullptr) {
         LOG(ERROR) << "Could not allocate bgr frame";
         throw std::runtime_error{"Could not allocate bgr frame"};
     }
-    if (av_image_alloc(bgr_frame->data, bgr_frame->linesize, frame->width,
-                       frame->height, AV_PIX_FMT_BGR24, 1) < 0) {
+    if (av_image_alloc(grayscale_frame->data, grayscale_frame->linesize,
+                       frame->width, frame->height, destination_format, 1) < 0) {
         LOG(ERROR) << "Could not allocate raw picture buffer";
         throw std::bad_alloc{};
     }
 
-    auto err = sws_scale_frame(sws_ctx, bgr_frame, frame);
+    auto err = sws_scale_frame(sws_ctx.get(), grayscale_frame, frame);
     if (err < 0) {
         LOG(ERROR) << "Could not scale frame:" << libav_error(err);
         throw std::runtime_error{"Could not scale frame"};
     }
 
-    cv::Mat mat(frame->height, frame->width, CV_8UC3, bgr_frame->data[0], bgr_frame->linesize[0]);
+    img.height = grayscale_frame->height;
+    img.width = grayscale_frame->linesize[0];
+    img.buf.clear();
+    std::copy(grayscale_frame->data[0],
+              grayscale_frame->data[0] +
+                  grayscale_frame->linesize[0] * img.height,
+              std::back_inserter(img.buf));
 
-    av_frame_free(&bgr_frame);
-    sws_freeContext(sws_ctx);
-
-    return mat;
+    //av_freep(&grayscale_frame->data[0]);
+    av_frame_free(&grayscale_frame);
 }
 
 } // namespace
@@ -86,18 +98,21 @@ void decode(std::vector<std::uint8_t> &dst,
         LOG(ERROR) << "Could not find video stream";
         return;
     }
-    AVCodecContext *codec_context = avcodec_alloc_context3(codec);
-    if (codec_context == nullptr) {
+    std::unique_ptr<AVCodecContext, decltype(&AVCodecContextDeleter)>
+        codec_context{avcodec_alloc_context3(codec), &AVCodecContextDeleter};
+    if (!codec_context) {
         LOG(ERROR) << "Could not allocate codec context";
         throw std::bad_alloc{};
     }
-    if (auto err = avcodec_parameters_to_context(codec_context, codec_params);
+    if (auto err =
+            avcodec_parameters_to_context(codec_context.get(), codec_params);
         err < 0) {
         LOG(ERROR) << "Could not copy codec params to codec context:"
                    << libav_error(err);
-        throw std::runtime_error{"Could not copy codec params to codec context"};
+        throw std::runtime_error{
+            "Could not copy codec params to codec context"};
     }
-    if (int err = avcodec_open2(codec_context, codec, nullptr); err < 0) {
+    if (int err = avcodec_open2(codec_context.get(), codec, nullptr); err < 0) {
         LOG(ERROR) << "Could not open codec:" << libav_error(err);
         return;
     }
@@ -111,24 +126,30 @@ void decode(std::vector<std::uint8_t> &dst,
         LOG(ERROR) << "Could not allocate packet";
         throw std::bad_alloc{};
     }
+    std::unique_ptr<qr_code_decoder_t> qr_code_decoder{nullptr};
+    image_buf_t img{};
     while (av_read_frame(format_context, packet) >= 0) {
         if (static_cast<size_t>(packet->stream_index) == video_stream_idx) {
-            int ret = avcodec_send_packet(codec_context, packet);
+            int ret = avcodec_send_packet(codec_context.get(), packet);
             if (ret < 0) {
                 LOG(ERROR) << "Error sending packet to decoder:"
                            << libav_error(ret);
                 return;
             }
             while (ret >= 0) {
-                ret = avcodec_receive_frame(codec_context, frame);
+                ret = avcodec_receive_frame(codec_context.get(), frame);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                     break;
                 } else if (ret < 0) {
                     LOG(ERROR) << "Error during decoding:" << libav_error(ret);
                     return;
                 }
-                cv::Mat mat = get_frame_pixels(frame);
-                decode_qr_code(dst, mat);
+                get_frame_pixels(img, frame);
+                if (!qr_code_decoder) {
+                    qr_code_decoder = std::make_unique<qr_code_decoder_t>(
+                        img.width, img.height);
+                }
+                qr_code_decoder->decode(dst, img.buf);
             }
         }
         av_packet_unref(packet);
@@ -137,7 +158,6 @@ void decode(std::vector<std::uint8_t> &dst,
     if (packet != nullptr)
         av_packet_free(&packet);
     av_frame_free(&frame);
-    avcodec_free_context(&codec_context);
 }
 
 } // namespace net_zelcon::plain_sight

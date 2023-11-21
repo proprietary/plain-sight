@@ -40,6 +40,7 @@ target_link_libraries(
     com_github_nayuki_QRCodeGenerator
     glog::glog
     PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL PkgConfig::SWSCALE
+    quirc
     ${OpenCV_LIBS}
 )
 set_target_properties(
