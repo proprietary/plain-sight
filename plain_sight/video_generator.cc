@@ -12,6 +12,7 @@ extern "C" {
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
+#include <glog/logging.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -25,13 +26,21 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     if (qr_codes.size() < 1)
         return;
 
+#ifdef DEBUG
     av_log_set_level(AV_LOG_DEBUG);
+#endif
 
-    // Get maximal size of QR Codes
+    // Compute size of QR Codes
     const auto qr_code_size = qr_codes[0].getSize();
-    constexpr auto border = 8;
-    auto max_size_value = qr_code_size + border * 2;
-    while (max_size_value % 2 != 0)
+    CHECK(std::all_of(qr_codes.begin(), qr_codes.end(),
+                      [qr_code_size](const auto &qr_code) {
+                          return qr_code.getSize() == qr_code_size;
+                      }))
+        << "QR Codes must all be the same size";
+    constexpr auto border = 10;
+    constexpr auto scale = 8;
+    auto max_size_value = scale * qr_code_size + border * 2;
+    while (max_size_value % 2 != 0) // because libav needs a multiple of 2
         max_size_value++;
 
     // Open output file
@@ -73,45 +82,46 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     codec_context->codec_type = AVMEDIA_TYPE_VIDEO;
     codec_context->pix_fmt = AV_PIX_FMT_YUV420P;
     // Resolution
-    codec_context->width = max_size_value;  // Set your desired video width
-    codec_context->height = max_size_value; // Set your desired video height
+    codec_context->width = max_size_value;
+    codec_context->height = max_size_value;
     // frame rate
-    codec_context->time_base =
-        AVRational{.num = 1, .den = 20}; // Set your desired frame rate
+    codec_context->time_base = AVRational{
+        .num = 1, .den = 20}; // most social media don't accept >30fps
     codec_context->gop_size = 1;
     codec_context->max_b_frames = 1;
 
     // Open video codec
     if (avcodec_open2(codec_context, codec, nullptr) < 0) {
-        std::cerr << "Error opening video codec" << std::endl;
+        LOG(ERROR) << "Error opening video codec";
         return;
     }
 
     // Create new video stream
     AVStream *video_stream = avformat_new_stream(format_context, codec);
     if (video_stream == nullptr) {
-        std::cerr << "Error creating new stream" << std::endl;
-        return;
+        LOG(ERROR) << "Error creating new stream";
+        throw std::runtime_error{"Error creating new stream"};
     }
 
     // Copy codec parameters to video stream
     if (avcodec_parameters_from_context(video_stream->codecpar, codec_context) <
         0) {
-        std::cerr << "Error copying codec parameters to stream" << std::endl;
-        return;
+        LOG(ERROR) << "Error copying codec parameters to stream";
+        throw std::runtime_error{
+            "Error copying codec parameters to stream"};
     }
 
     // Write stream header
     if (avformat_write_header(format_context, nullptr) < 0) {
-        std::cerr << "Error writing stream header" << std::endl;
-        return;
+        LOG(ERROR) << "Error writing stream header";
+        throw std::runtime_error{"Error writing stream header"};
     }
 
     // Create video frame
     AVFrame *video_frame = av_frame_alloc();
     if (!video_frame) {
-        std::cerr << "Error allocating video frame" << std::endl;
-        return;
+        LOG(ERROR) << "Error allocating video frame";
+        throw std::runtime_error{"Error allocating video frame"};
     }
 
     // Set frame parameters
@@ -124,8 +134,8 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
                             video_frame->width, video_frame->height,
                             AV_PIX_FMT_YUV420P, 1);
     if (sz < 0) {
-        std::cerr << "Error allocating frame buffer" << std::endl;
-        return;
+        LOG(ERROR) << "Error allocating frame buffer";
+        throw std::bad_alloc{};
     }
 
     AVPacket *pkt = av_packet_alloc();
@@ -136,30 +146,79 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     int ret;
     int frame_counter = 0;
 
-    // Write QR Codes to video frames
+    // Write QR Codes to video frames.
     for (const auto &qr_code : qr_codes) {
+        // TODO: this is embarassingly parallel;
+        // parallelize it (gotta stick with CPU only tho; OpenMP?)
 
-        // Generate QR Code image
-        for (int row = 0; row < max_size_value; row++) {
-            const int y = row - border;
-            for (int col = 0; col < max_size_value; col++) {
-                const bool is_border = row < border || col < border ||
-                                       row >= max_size_value - border ||
-                                       col >= max_size_value - border;
-                if (is_border) {
-                    video_frame->data[0][row * video_frame->linesize[0] + col] =
-                        255; // Y
-                    video_frame->data[1][row / 2 * video_frame->linesize[1] +
-                                         col / 2] = 128; // U
-                    video_frame->data[2][row / 2 * video_frame->linesize[2] +
-                                         col / 2] = 128; // V
-                    continue;
-                }
-                const int x = col - border;
-                const bool pixel = qr_code.getModule(x, y);
-                // Convert QR Code image to YUV420P format
+        // Draw QR code image with a white border and some zooming
+        int row = 0;
+        // fill top border with white
+        for (; row < border; ++row) {
+            for (int col = 0; col < scale * qr_code_size + 2 * border; ++col) {
                 video_frame->data[0][row * video_frame->linesize[0] + col] =
-                    pixel ? 0 : 255; // Y
+                    255; // Y
+                video_frame
+                    ->data[1][row / 2 * video_frame->linesize[1] + col / 2] =
+                    128; // U
+                video_frame
+                    ->data[2][row / 2 * video_frame->linesize[2] + col / 2] =
+                    128; // V
+            }
+        }
+        for (; row < scale * qr_code_size + border; ++row) {
+            // fill left border with white
+            int col = 0;
+            for (; col < border; ++col) {
+                video_frame->data[0][row * video_frame->linesize[0] + col] =
+                    255; // Y
+                video_frame
+                    ->data[1][row / 2 * video_frame->linesize[1] + col / 2] =
+                    128; // U
+                video_frame
+                    ->data[2][row / 2 * video_frame->linesize[2] + col / 2] =
+                    128; // V
+            }
+            for (; col < scale * qr_code_size + border; ++col) {
+                // fill QR Code with black or white
+                const int y = (row - border) / scale;
+                const int x = (col - border) / scale;
+                // this tells us whether to draw a black or white pixel
+                const bool pixel = qr_code.getModule(x, y);
+                for (int i = 0; i < scale; ++i) {
+                    const int rdx = border + (y * scale + i);
+                    for (int j = 0; j < scale; ++j) {
+                        const int cdx = border + (x * scale + j);
+                        // Convert QR Code image to YUV420P format
+                        video_frame
+                            ->data[0][rdx * video_frame->linesize[0] + cdx] =
+                            pixel ? 0 : 255; // Y
+                        video_frame
+                            ->data[1][rdx / 2 * video_frame->linesize[1] +
+                                      cdx / 2] = 128; // U
+                        video_frame
+                            ->data[2][rdx / 2 * video_frame->linesize[2] +
+                                      cdx / 2] = 128; // V
+                    }
+                }
+            }
+            // fill right border with white
+            for (; col < scale * qr_code_size + border * 2; ++col) {
+                video_frame->data[0][row * video_frame->linesize[0] + col] =
+                    255; // Y
+                video_frame
+                    ->data[1][row / 2 * video_frame->linesize[1] + col / 2] =
+                    128; // U
+                video_frame
+                    ->data[2][row / 2 * video_frame->linesize[2] + col / 2] =
+                    128; // V
+            }
+        }
+        // fill bottom border with white
+        for (; row < scale * qr_code_size + border * 2; ++row) {
+            for (int col = 0; col < scale * qr_code_size + 2 * border; ++col) {
+                video_frame->data[0][row * video_frame->linesize[0] + col] =
+                    255; // Y
                 video_frame
                     ->data[1][row / 2 * video_frame->linesize[1] + col / 2] =
                     128; // U
