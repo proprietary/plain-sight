@@ -1,3 +1,4 @@
 add_subdirectory(com_github_nayuki_QR-Code-Generator)
 add_subdirectory(com_github_google_googletest)
 add_subdirectory(com_github_google_glog)
+add_subdirectory(com_github_dlbeer_quirc)
