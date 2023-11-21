@@ -2,6 +2,8 @@
 
 ## Dependencies
 
+Debian 12 (bookworm):
+
 ```bash
 sudo apt install \
     libavfilter-dev \
@@ -9,7 +11,8 @@ sudo apt install \
     libavcodec-dev \
     libavutil-dev \
     ffmpeg \
-    pkg-config
+    pkg-config \
+    libopencv-dev
 ```
 
 ## License

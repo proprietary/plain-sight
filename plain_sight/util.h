@@ -4,10 +4,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <vector>
+#include <string>
 
 namespace net_zelcon::plain_sight {
 
 void read_file(std::vector<std::uint8_t> &dst, std::filesystem::path path);
+
+std::string libav_error(int error);
 
 } // namespace net_zelcon::plain_sight
 

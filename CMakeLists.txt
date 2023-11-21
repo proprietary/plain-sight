@@ -3,6 +3,8 @@ project(plain_sight)
 
 set(CMAKE_CXX_STANDARD 20)
 
+# Dependencies
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
@@ -10,7 +12,12 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(AVFILTER REQUIRED IMPORTED_TARGET libavfilter)
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 
+find_package(OpenCV REQUIRED)
+
 add_subdirectory(third_party)
+
+
+# Plain Sight core library:
 
 add_library(plain_sight)
 target_sources(
@@ -18,9 +25,9 @@ target_sources(
     PUBLIC
     plain_sight/video_generator.h
     plain_sight/video_generator.cc
+    plain_sight/qr_codes.h plain_sight/qr_codes.cc
     plain_sight/decoder.h plain_sight/decoder.cc
     plain_sight/encoder.h plain_sight/encoder.cc
-    plain_sight/qr_codes.h plain_sight/qr_codes.cc
     plain_sight/util.h plain_sight/util.cc
 )
 target_include_directories(
@@ -33,7 +40,29 @@ target_link_libraries(
     com_github_nayuki_QRCodeGenerator
     glog::glog
     PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL PkgConfig::SWSCALE
+    ${OpenCV_LIBS}
 )
+set_target_properties(
+    plain_sight
+    PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+target_compile_options(
+    plain_sight
+    PRIVATE
+    -Wall -Wextra -Werror -Wpedantic
+    #$<$<CONFIG:Debug>:-fsanitize=address,undefined -fno-omit-frame-pointer -g3>
+)
+target_link_options(
+    plain_sight
+    PUBLIC
+    #$<$<CONFIG:DEBUG>:-fsanitize=address,undefined -fno-omit-frame-pointer>
+)
+
+#######################
+#      Tests          #
+#######################
 
 enable_testing()
 add_executable(

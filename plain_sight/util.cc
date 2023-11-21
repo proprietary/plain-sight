@@ -3,6 +3,10 @@
 #include <fstream>
 #include <iterator>
 
+extern "C" {
+  #include <libavutil/error.h>
+}
+
 namespace net_zelcon::plain_sight {
 void read_file(std::vector<std::uint8_t> &dst, std::filesystem::path path) {
   std::ifstream file(path, std::ios::binary);
@@ -17,4 +21,11 @@ void read_file(std::vector<std::uint8_t> &dst, std::filesystem::path path) {
   dst.insert(dst.begin(), std::istream_iterator<std::uint8_t>(file),
              std::istream_iterator<std::uint8_t>());
 }
+
+std::string libav_error(int error) {
+  std::string output(AV_ERROR_MAX_STRING_SIZE, '\0');
+  av_make_error_string(output.data(), AV_ERROR_MAX_STRING_SIZE, error);
+  return output;
+}
+
 } // namespace net_zelcon::plain_sight
