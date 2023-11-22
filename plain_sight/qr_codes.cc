@@ -1,11 +1,11 @@
 #include "plain_sight/qr_codes.h"
 #include <glog/logging.h>
+#include <iterator>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/objdetect.hpp>
 #include <qrcodegen.hpp>
 #include <string>
-#include <iterator>
 
 namespace net_zelcon::plain_sight {
 
@@ -14,9 +14,11 @@ auto split_frames(const std::vector<std::uint8_t> &src)
     std::vector<qrcodegen::QrCode> qr_codes;
     constexpr std::ptrdiff_t max_size = 100;
     constexpr auto qr_version = 20;
-    for (auto it = src.begin(); it != src.end(); std::advance(it, std::min(max_size, std::distance(it, src.end())))) {
-        const std::vector<std::uint8_t> chunk(it,
-                                        std::next(it, std::min(max_size, std::distance(it, src.end()))));
+    for (auto it = src.begin(); it != src.end();
+         std::advance(it, std::min(max_size, std::distance(it, src.end())))) {
+        const std::vector<std::uint8_t> chunk(
+            it,
+            std::next(it, std::min(max_size, std::distance(it, src.end()))));
         const std::vector<qrcodegen::QrSegment> segments = {
             qrcodegen::QrSegment::makeBytes(chunk)};
         const auto qr_code = qrcodegen::QrCode::encodeSegments(

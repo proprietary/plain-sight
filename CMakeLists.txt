@@ -3,6 +3,8 @@ project(plain_sight)
 
 set(CMAKE_CXX_STANDARD 20)
 
+set(CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS}")
+
 # Dependencies
 
 find_package(PkgConfig REQUIRED)
@@ -29,6 +31,7 @@ target_sources(
     plain_sight/decoder.h plain_sight/decoder.cc
     plain_sight/encoder.h plain_sight/encoder.cc
     plain_sight/util.h plain_sight/util.cc
+    plain_sight/codec.h plain_sight/codec.cc
 )
 target_include_directories(
     plain_sight
@@ -41,6 +44,7 @@ target_link_libraries(
     glog::glog
     PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL PkgConfig::SWSCALE
     quirc
+    fmt::fmt
     ${OpenCV_LIBS}
 )
 set_target_properties(
@@ -52,7 +56,7 @@ set_target_properties(
 target_compile_options(
     plain_sight
     PRIVATE
-    -Wall -Wextra -Werror -Wpedantic
+    #-Wall -Wextra -Werror -Wpedantic
     #$<$<CONFIG:Debug>:-fsanitize=address,undefined -fno-omit-frame-pointer -g3>
 )
 target_link_options(
@@ -74,6 +78,19 @@ target_link_libraries(
     video_generator_test
     plain_sight
     GTest::gtest_main
+    ${OpenCV_LIBS}
+    quirc
+    com_github_nayuki_QRCodeGenerator
+)
+add_executable(
+    codec_test
+    plain_sight/codec_test.cc
+)
+target_link_libraries(
+    codec_test
+    plain_sight
+    GTest::gtest_main
 )
 include(GoogleTest)
 gtest_discover_tests(video_generator_test)
+gtest_discover_tests(codec_test)

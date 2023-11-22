@@ -143,7 +143,7 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     pkt->data = nullptr;
     pkt->size = 0;
 
-    int ret;
+    int ret = 0;
     int frame_counter = 0;
 
     // Write QR Codes to video frames.

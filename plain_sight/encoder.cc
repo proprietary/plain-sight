@@ -8,6 +8,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavformat/avio.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
@@ -77,7 +78,7 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
         avcodec_parameters_to_context(codec_context.get(), stream->codecpar);
     if (err < 0) {
         LOG(FATAL) << "Could not initialize codec parameters:"
-                   << av_err2str(err);
+                   << libav_error(err);
     }
     if (format_context->oformat->flags & AVFMT_GLOBALHEADER) {
         codec_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -93,20 +94,20 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     codec_context->gop_size = gop_size_;
     codec_context->bit_rate = bitrate_;
     // initialize codec
-    int err = avcodec_open2(codec_context.get(), codec, nullptr);
+    err = avcodec_open2(codec_context.get(), codec, nullptr);
     if (err < 0) {
-        LOG(FATAL) << "Could not open codec:" << av_err2str(err);
+        LOG(FATAL) << "Could not open codec:" << libav_error(err);
     }
     stream->codecpar->extradata = codec_context->extradata;
     stream->codecpar->extradata_size = codec_context->extradata_size;
     // write file header
     err = avformat_write_header(format_context.get(), nullptr);
     if (err < 0) {
-        LOG(FATAL) << "Could not write header:" << av_err2str(err);
+        LOG(FATAL) << "Could not write header:" << libav_error(err);
     }
     // allocate frame
-    std::unique_ptr<AVFrame, decltype(&av_frame_free)> frame{av_frame_alloc(),
-                                                             &av_frame_free};
+    std::unique_ptr<AVFrame, av_frame_deleter_t> frame{av_frame_alloc(),
+                                                       av_frame_deleter_t{}};
     CHECK(frame) << "Failed to allocate AVFrame";
     // set frame parameters
     frame->width = codec_context->width;
@@ -119,34 +120,33 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     // allocate packet
     std::unique_ptr<AVPacket, av_packet_deleter_t> packet{
         av_packet_alloc(), av_packet_deleter_t{}};
-    int frame_counter = 0;
-    const auto receive_packet = [&frame_counter](
-                                    AVCodecContext *const codec_context,
-                                    AVPacket *const packet,
-                                    AVFormatContext *const format_context) {
+    const auto receive_packet = [](AVCodecContext *const codec_context,
+                                   AVPacket *const packet,
+                                   AVFormatContext *const format_context) {
         int err;
         while (true) {
             err = avcodec_receive_packet(codec_context, packet);
             if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) {
                 break;
             } else if (err < 0) {
-                LOG(FATAL) << "Could not receive packet:" << av_err2str(err);
+                LOG(FATAL) << "Could not receive packet:" << libav_error(err);
             }
             // write packet
             err = av_interleaved_write_frame(format_context, packet);
             if (err < 0) {
-                LOG(FATAL) << "Could not write frame:" << av_err2str(err);
+                LOG(FATAL) << "Could not write frame:" << libav_error(err);
             }
             av_packet_unref(packet);
         }
     };
+    int frame_counter = 0;
     for (const auto &qr_code : *qr_codes_) {
         // encode frame
         draw_frame(frame.get(), qr_code, border_size_, scale_);
         frame->pts = frame_counter++;
         err = avcodec_send_frame(codec_context.get(), frame.get());
         if (err < 0) {
-            LOG(FATAL) << "Could not send frame:" << av_err2str(err);
+            LOG(FATAL) << "Could not send frame:" << libav_error(err);
         }
         receive_packet(codec_context.get(), packet.get(), format_context.get());
     }
@@ -154,28 +154,23 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     // encoder still has packets buffered, it will return them.
     err = avcodec_send_frame(codec_context.get(), nullptr);
     if (err < 0) {
-        LOG(FATAL) << "Could not send frame:" << av_err2str(err);
+        LOG(FATAL) << "Could not send frame:" << libav_error(err);
     }
     receive_packet(codec_context.get(), packet.get(), format_context.get());
     // Write trailer
     err = av_write_trailer(format_context.get());
     if (err < 0) {
-        LOG(FATAL) << "Could not write trailer:" << av_err2str(err);
+        LOG(FATAL) << "Could not write trailer:" << libav_error(err);
     }
 }
 
 auto encoder_t::builder_t::build() const -> encoder_t {
-    CHECK(video_output_.operator bool());
     CHECK(qr_codes_.operator bool());
     CHECK(!video_format_.empty());
     CHECK_GT(scale_, 0);
     CHECK_GT(border_size_, 0);
     CHECK_GT(fps_, 0);
-    return encoder_t{std::move(video_output_),
-                     std::move(qr_codes_),
-                     video_format_,
-                     scale_,
-                     border_size_,
+    return encoder_t{std::move(qr_codes_), video_format_, scale_, border_size_,
                      fps_};
 }
 
@@ -183,21 +178,9 @@ auto encoder_t::builder_t::video_format() const noexcept -> std::string_view {
     return video_format_;
 }
 
-auto encoder_t::builder_t::video_output() const noexcept
-    -> std::weak_ptr<video_output_t> {
-    return video_output_;
-}
-
 auto encoder_t::builder_t::qr_codes() const noexcept
     -> std::shared_ptr<std::vector<qrcodegen::QrCode>> {
     return qr_codes_;
-}
-
-auto encoder_t::builder_t::set_video_output(
-    std::shared_ptr<video_output_t> video_output) noexcept
-    -> encoder_t::builder_t & {
-    video_output_ = std::move(video_output);
-    return *this;
 }
 
 auto encoder_t::builder_t::set_qr_codes(
@@ -247,13 +230,13 @@ auto encoder_t::builder_t::set_fps(const int fps) noexcept -> builder_t & {
 file_video_output_t::file_video_output_t(const std::filesystem::path &filename)
     : filename_{filename} {
     CHECK(!filename.empty());
-    CHECK_GT(std::filesystem::perms::owner_write &
-                 std::filesystem::status(filename.parent_path()).permissions(),
-             0)
+    CHECK((std::filesystem::perms::owner_write &
+           std::filesystem::status(filename.parent_path()).permissions()) ==
+          std::filesystem::perms::owner_write)
         << "Cannot write to " << std::quoted(filename.parent_path().string());
     int err = avio_open(&io_context_, filename.c_str(), AVIO_FLAG_WRITE);
     if (err < 0) {
-        LOG(FATAL) << "avio_open failed: " << av_err2str(err);
+        LOG(FATAL) << "avio_open failed: " << libav_error(err);
     }
 }
 
@@ -262,12 +245,13 @@ file_video_output_t::~file_video_output_t() noexcept {
         avio_close(io_context_);
 }
 
-auto file_video_output_t::get_io_context() const noexcept
-    -> AVIOContext *const {
+auto file_video_output_t::get_io_context() const noexcept -> AVIOContext * {
     return io_context_;
 }
 
-in_memory_video_output_t::in_memory_video_output_t() {
+in_memory_video_output_t::in_memory_video_output_t(
+    std::vector<std::uint8_t> &sink)
+    : sink_{sink} {
     buffer_ = static_cast<std::uint8_t *>(av_malloc(buffer_size_));
     CHECK(buffer_ != nullptr);
     constexpr bool write_flag = 1;
@@ -284,8 +268,14 @@ in_memory_video_output_t::~in_memory_video_output_t() noexcept {
         avio_context_free(&io_context_);
 }
 
+auto in_memory_video_output_t::get_video_contents() noexcept
+    -> std::span<std::uint8_t> {
+    std::span<std::uint8_t> s(sink_.data(), sink_.size());
+    return s;
+}
+
 auto in_memory_video_output_t::get_io_context() const noexcept
-    -> AVIOContext *const {
+    -> AVIOContext * {
     return io_context_;
 }
 
@@ -298,7 +288,8 @@ int in_memory_video_output_t::write_packet(void *opaque, std::uint8_t *buf,
     auto *const self = static_cast<in_memory_video_output_t *>(opaque);
     CHECK(self->buffer_ != nullptr);
     CHECK(self->io_context_ != nullptr);
-    std::copy_n(buf, buf_size, std::back_inserter(self->buffer_contents_));
+    std::copy_n(buf, buf_size, std::back_inserter(self->sink_));
+    return buf_size;
 }
 
 } // namespace net_zelcon::plain_sight

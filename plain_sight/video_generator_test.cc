@@ -5,9 +5,9 @@
 #include "plain_sight/util.h"
 #include "plain_sight/video_generator.h"
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
 #include <iostream>
 
 extern "C" {
@@ -63,7 +63,8 @@ TEST(VideoGeneratorTest, EndToEnd) {
     std::vector<std::uint8_t> decoded_bytes;
     net_zelcon::plain_sight::decode(decoded_bytes, output_path);
     ASSERT_EQ(decoded_bytes.size(), text.size());
-    ASSERT_TRUE(std::memcmp(decoded_bytes.data(), text.data(), text.size()) == 0);
+    ASSERT_TRUE(std::memcmp(decoded_bytes.data(), text.data(), text.size()) ==
+                0);
     // teardown
-    //std::filesystem::remove(output_path);
+    // std::filesystem::remove(output_path);
 }
