@@ -5,21 +5,23 @@
 #include <opencv2/objdetect.hpp>
 #include <qrcodegen.hpp>
 #include <string>
+#include <iterator>
 
 namespace net_zelcon::plain_sight {
 
 auto split_frames(const std::vector<std::uint8_t> &src)
     -> std::vector<qrcodegen::QrCode> {
     std::vector<qrcodegen::QrCode> qr_codes;
-    constexpr size_t max_size = 100;
-    for (size_t i = 0; i < src.size(); i += max_size) {
-        size_t size = std::min(max_size, src.size() - i);
-        std::vector<std::uint8_t> chunk(src.begin() + i,
-                                        src.begin() + i + size);
+    constexpr std::ptrdiff_t max_size = 100;
+    constexpr auto qr_version = 20;
+    for (auto it = src.begin(); it != src.end(); std::advance(it, std::min(max_size, std::distance(it, src.end())))) {
+        const std::vector<std::uint8_t> chunk(it,
+                                        std::next(it, std::min(max_size, std::distance(it, src.end()))));
         const std::vector<qrcodegen::QrSegment> segments = {
             qrcodegen::QrSegment::makeBytes(chunk)};
         const auto qr_code = qrcodegen::QrCode::encodeSegments(
-            segments, qrcodegen::QrCode::Ecc::HIGH, 20, 20, -1, true);
+            segments, qrcodegen::QrCode::Ecc::HIGH, qr_version, qr_version, -1,
+            true);
         qr_codes.emplace_back(std::move(qr_code));
     }
     return qr_codes;
@@ -80,6 +82,7 @@ void qr_code_decoder_t::decode(std::vector<std::uint8_t> &dst,
     quirc_end(qr_.get());
     int num_codes = quirc_count(qr_.get());
     DLOG(INFO) << "Found " << num_codes << " QR codes";
+    CHECK(num_codes > 0) << "No QR codes found";
     for (int i = 0; i < num_codes; i++) {
         quirc_code code;
         quirc_extract(qr_.get(), i, &code);

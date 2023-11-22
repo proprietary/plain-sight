@@ -1,5 +1,6 @@
 #include "plain_sight/video_generator.h"
 #include "plain_sight/qr_codes.h"
+#include "plain_sight/util.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -107,8 +108,7 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     if (avcodec_parameters_from_context(video_stream->codecpar, codec_context) <
         0) {
         LOG(ERROR) << "Error copying codec parameters to stream";
-        throw std::runtime_error{
-            "Error copying codec parameters to stream"};
+        throw std::runtime_error{"Error copying codec parameters to stream"};
     }
 
     // Write stream header
@@ -127,12 +127,12 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     // Set frame parameters
     video_frame->width = max_size_value;
     video_frame->height = max_size_value;
-    video_frame->format = AV_PIX_FMT_YUV420P;
+    video_frame->format = codec_context->pix_fmt;
 
     // allocate framebuffer
     int sz = av_image_alloc(video_frame->data, video_frame->linesize,
                             video_frame->width, video_frame->height,
-                            AV_PIX_FMT_YUV420P, 1);
+                            codec_context->pix_fmt, 1);
     if (sz < 0) {
         LOG(ERROR) << "Error allocating frame buffer";
         throw std::bad_alloc{};
@@ -263,12 +263,16 @@ void write_qr_codes(const std::vector<qrcodegen::QrCode> &qr_codes,
     // Flush encoder with a null frame
     avcodec_send_frame(codec_context, nullptr);
 
-    while (avcodec_receive_packet(codec_context, pkt) == 0) {
+    while ((ret = avcodec_receive_packet(codec_context, pkt)) >= 0) {
         pkt->stream_index = video_stream->index;
         av_packet_rescale_ts(pkt, codec_context->time_base,
                              video_stream->time_base);
         av_interleaved_write_frame(format_context, pkt);
         av_packet_unref(pkt);
+    }
+    if (ret != AVERROR_EOF) {
+        LOG(ERROR) << "Error flushing encoder:" << libav_error(ret);
+        throw std::runtime_error{"Error flushing encoder"};
     }
 
     // Write trailer

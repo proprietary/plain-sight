@@ -44,4 +44,12 @@ void AVCodecContextDeleter(AVCodecContext *p) {
     avcodec_free_context(&p);
 }
 
+void avcodec_context_deleter_t::operator()(AVCodecContext *p) const {
+    avcodec_free_context(&p);
+}
+
+void av_packet_deleter_t::operator()(AVPacket *p) const {
+    av_packet_free(&p);
+}
+
 } // namespace net_zelcon::plain_sight

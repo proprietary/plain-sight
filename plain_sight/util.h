@@ -20,6 +20,14 @@ std::string libav_error(int error);
 
 void AVCodecContextDeleter(AVCodecContext *p);
 
+struct avcodec_context_deleter_t {
+  void operator()(AVCodecContext *p) const;
+};
+
+struct av_packet_deleter_t {
+  void operator()(AVPacket *p) const;
+};
+
 } // namespace net_zelcon::plain_sight
 
 #endif // _INCLUDE_NET_ZELCON_PLAIN_SIGHT_UTIL_H_

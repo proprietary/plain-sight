@@ -96,7 +96,7 @@ void decode(std::vector<std::uint8_t> &dst,
     }
     if (video_stream_idx == std::numeric_limits<size_t>::max()) {
         LOG(ERROR) << "Could not find video stream";
-        return;
+        throw std::runtime_error{"Could not find video stream"};
     }
     std::unique_ptr<AVCodecContext, decltype(&AVCodecContextDeleter)>
         codec_context{avcodec_alloc_context3(codec), &AVCodecContextDeleter};
@@ -137,6 +137,7 @@ void decode(std::vector<std::uint8_t> &dst,
                 return;
             }
             while (ret >= 0) {
+                // process decoded frame
                 ret = avcodec_receive_frame(codec_context.get(), frame);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                     break;
@@ -154,10 +155,27 @@ void decode(std::vector<std::uint8_t> &dst,
         }
         av_packet_unref(packet);
     }
-    avformat_close_input(&format_context);
-    if (packet != nullptr)
-        av_packet_free(&packet);
+    // Flush the decoder with a null packet
+    int ret = avcodec_send_packet(codec_context.get(), packet);
+    if (ret < 0) {
+        LOG(ERROR) << "Error sending packet to decoder:" << libav_error(ret);
+        throw std::runtime_error{"Error sending packet to decoder"};
+    }
+    while ((ret = avcodec_receive_frame(codec_context.get(), frame)) >= 0) {
+        get_frame_pixels(img, frame);
+        if (!qr_code_decoder) {
+            qr_code_decoder = std::make_unique<qr_code_decoder_t>(
+                img.width, img.height);
+        }
+        qr_code_decoder->decode(dst, img.buf);
+    }
+    if (ret != AVERROR_EOF) {
+        LOG(ERROR) << "Error during decoding:" << libav_error(ret);
+        throw std::runtime_error{"Error during decoding"};
+    }
+    av_packet_free(&packet);
     av_frame_free(&frame);
+    avformat_close_input(&format_context);
 }
 
 } // namespace net_zelcon::plain_sight
