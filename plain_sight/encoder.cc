@@ -46,8 +46,8 @@ void draw_frame(AVFrame *const frame, const qrcodegen::QrCode &qr_code,
     // Color channels: U and V (Cb and Cr). These are always the same value
     // because the QR code is grayscale. Therefore it is easier to just set them
     // all to 128 in a contiguous, branch-free loop.
-    for (int y = 0; y < frame->height; ++y) {
-        for (int x = 0; x < frame->width; ++x) {
+    for (int y = 0; y < frame->height / 2; ++y) {
+        for (int x = 0; x < frame->width / 2; ++x) {
             frame->data[1][y * frame->linesize[1] + x] = 128;
             frame->data[2][y * frame->linesize[2] + x] = 128;
         }
@@ -67,19 +67,14 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     CHECK(format_context->pb != nullptr);
     AVStream *const stream = avformat_new_stream(format_context.get(), nullptr);
     CHECK(stream != nullptr);
+    CHECK_EQ(stream, format_context->streams[0]);
     const AVCodec *const codec = avcodec_find_encoder(
-        format_context->oformat->video_codec); // AV_CODEC_ID_H264
+        format_context->oformat->video_codec); // probably is AV_CODEC_ID_H264
     CHECK(codec != nullptr) << "Codec for " << std::quoted(video_format_)
                             << " not found on host system";
-    std::unique_ptr<AVCodecContext, avcodec_context_deleter_t> codec_context{
-        avcodec_alloc_context3(codec), avcodec_context_deleter_t{}};
+    libav_2_star_ptr_t<AVCodecContext, avcodec_free_context> codec_context{
+        avcodec_alloc_context3(codec), avcodec_free_context};
     CHECK(codec_context) << "Failed to allocate AVCodecContext";
-    int err =
-        avcodec_parameters_to_context(codec_context.get(), stream->codecpar);
-    if (err < 0) {
-        LOG(FATAL) << "Could not initialize codec parameters:"
-                   << libav_error(err);
-    }
     if (format_context->oformat->flags & AVFMT_GLOBALHEADER) {
         codec_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
@@ -93,21 +88,27 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     codec_context->pix_fmt = AV_PIX_FMT_YUV420P;
     codec_context->gop_size = gop_size_;
     codec_context->bit_rate = bitrate_;
-    // initialize codec
-    err = avcodec_open2(codec_context.get(), codec, nullptr);
+    //  initialize codec
+    int err = avcodec_open2(codec_context.get(), codec, nullptr);
     if (err < 0) {
         LOG(FATAL) << "Could not open codec:" << libav_error(err);
     }
-    stream->codecpar->extradata = codec_context->extradata;
-    stream->codecpar->extradata_size = codec_context->extradata_size;
-    // write file header
+    err =
+        avcodec_parameters_from_context(stream->codecpar, codec_context.get());
+    if (err < 0) {
+        LOG(FATAL) << "Could not initialize codec parameters:"
+                   << libav_error(err);
+    }
+    // stream->codecpar->extradata = codec_context->extradata;
+    // stream->codecpar->extradata_size = codec_context->extradata_size;
+    //  write file header
     err = avformat_write_header(format_context.get(), nullptr);
     if (err < 0) {
         LOG(FATAL) << "Could not write header:" << libav_error(err);
     }
     // allocate frame
-    std::unique_ptr<AVFrame, av_frame_deleter_t> frame{av_frame_alloc(),
-                                                       av_frame_deleter_t{}};
+    libav_2_star_ptr_t<AVFrame, av_frame_free> frame{av_frame_alloc(),
+                                                     av_frame_free};
     CHECK(frame) << "Failed to allocate AVFrame";
     // set frame parameters
     frame->width = codec_context->width;
@@ -118,24 +119,29 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
                             frame->height, codec_context->pix_fmt, 1);
     CHECK_GE(sz, 0) << "Failed to allocate framebuffer";
     // allocate packet
-    std::unique_ptr<AVPacket, av_packet_deleter_t> packet{
-        av_packet_alloc(), av_packet_deleter_t{}};
+    libav_2_star_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
+                                                        av_packet_free};
     const auto receive_packet = [](AVCodecContext *const codec_context,
                                    AVPacket *const packet,
                                    AVFormatContext *const format_context) {
         int err;
         while (true) {
             err = avcodec_receive_packet(codec_context, packet);
-            if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) {
+            if (err == AVERROR(EAGAIN)) {
                 break;
-            } else if (err < 0) {
-                LOG(FATAL) << "Could not receive packet:" << libav_error(err);
+            } else if (err < 0 && err != AVERROR_EOF) {
+                LOG(FATAL) << "Could not receive packet: " << libav_error(err);
+            } else if (err >= 0) {
+                av_packet_rescale_ts(packet, codec_context->time_base,
+                                    format_context->streams[0]->time_base);
+                // write packet
+                err = av_interleaved_write_frame(format_context, packet);
+                if (err < 0) {
+                    LOG(FATAL) << "Could not write frame: " << libav_error(err);
+                }
             }
-            // write packet
-            err = av_interleaved_write_frame(format_context, packet);
-            if (err < 0) {
-                LOG(FATAL) << "Could not write frame:" << libav_error(err);
-            }
+            if (err == AVERROR_EOF)
+                break;
             av_packet_unref(packet);
         }
     };
@@ -143,21 +149,46 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     for (const auto &qr_code : *qr_codes_) {
         // encode frame
         draw_frame(frame.get(), qr_code, border_size_, scale_);
-        frame->pts = frame_counter++;
+        frame->pts = frame_counter;
+        DLOG(INFO) << "Sending frame " << frame_counter << " / "
+                   << qr_codes_->size() << " to encoder";
         err = avcodec_send_frame(codec_context.get(), frame.get());
         if (err < 0) {
-            LOG(FATAL) << "Could not send frame:" << libav_error(err);
+            LOG(FATAL) << "Could not send frame: " << libav_error(err);
         }
         receive_packet(codec_context.get(), packet.get(), format_context.get());
+        av_packet_unref(packet.get());
+        frame_counter++;
     }
+    CHECK_EQ(static_cast<size_t>(frame_counter), qr_codes_->size());
     // Flush encoder with null flush packet, signaling end of the stream. If the
     // encoder still has packets buffered, it will return them.
     err = avcodec_send_frame(codec_context.get(), nullptr);
     if (err < 0) {
-        LOG(FATAL) << "Could not send frame:" << libav_error(err);
+        LOG(FATAL) << "Could not send frame: " << libav_error(err);
     }
-    receive_packet(codec_context.get(), packet.get(), format_context.get());
-    // Write trailer
+    while (true) {
+        err = avcodec_receive_packet(codec_context.get(), packet.get());
+        if (err < 0 && err != AVERROR_EOF && err != AVERROR(EAGAIN)) {
+            LOG(FATAL) << "Could not receive packet: " << libav_error(err);
+        } else if (err >= 0) {
+            DLOG(INFO) << "Receive packet after flushing encoder";
+            av_packet_rescale_ts(packet.get(), codec_context->time_base,
+                                 format_context->streams[0]->time_base);
+            // write packet
+            err =
+                av_interleaved_write_frame(format_context.get(), packet.get());
+            if (err < 0) {
+                LOG(FATAL) << "Could not write frame: " << libav_error(err);
+            }
+        }
+        if (err == AVERROR_EOF) {
+            break;
+        }
+        av_packet_unref(packet.get());
+    }
+    // receive_packet(codec_context.get(), packet.get(), format_context.get());
+    //  Write trailer
     err = av_write_trailer(format_context.get());
     if (err < 0) {
         LOG(FATAL) << "Could not write trailer:" << libav_error(err);
@@ -167,8 +198,8 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
 auto encoder_t::builder_t::build() const -> encoder_t {
     CHECK(qr_codes_.operator bool());
     CHECK(!video_format_.empty());
-    CHECK_GT(scale_, 0);
-    CHECK_GT(border_size_, 0);
+    CHECK_GT(scale_, 0UL);
+    CHECK_GT(border_size_, 0UL);
     CHECK_GT(fps_, 0);
     return encoder_t{std::move(qr_codes_), video_format_, scale_, border_size_,
                      fps_};
@@ -255,9 +286,8 @@ in_memory_video_output_t::in_memory_video_output_t(
     buffer_ = static_cast<std::uint8_t *>(av_malloc(buffer_size_));
     CHECK(buffer_ != nullptr);
     constexpr bool write_flag = 1;
-    io_context_ =
-        avio_alloc_context(buffer_, buffer_size_, write_flag, this, nullptr,
-                           &in_memory_video_output_t::write_packet, nullptr);
+    io_context_ = avio_alloc_context(buffer_, buffer_size_, write_flag, this,
+                                     nullptr, &write_packet, &seek);
     CHECK(io_context_ != nullptr);
 }
 
@@ -290,6 +320,31 @@ int in_memory_video_output_t::write_packet(void *opaque, std::uint8_t *buf,
     CHECK(self->io_context_ != nullptr);
     std::copy_n(buf, buf_size, std::back_inserter(self->sink_));
     return buf_size;
+}
+
+std::int64_t in_memory_video_output_t::seek(void *opaque, std::int64_t offset,
+                                            int whence) noexcept {
+    // A function for seeking to specified byte position, may be NULL.
+    CHECK(opaque != nullptr);
+    auto *const self = static_cast<in_memory_video_output_t *>(opaque);
+    CHECK(self->buffer_ != nullptr);
+    CHECK(self->io_context_ != nullptr);
+    switch (whence) {
+    case SEEK_SET:
+        self->offset_ = offset;
+        break;
+    case SEEK_CUR:
+        self->offset_ += offset;
+        break;
+    case SEEK_END:
+        self->offset_ = self->sink_.size() + offset;
+        break;
+    case AVSEEK_SIZE:
+        return self->sink_.size();
+    default:
+        LOG(FATAL) << "Invalid whence: " << whence;
+    }
+    return self->offset_;
 }
 
 } // namespace net_zelcon::plain_sight

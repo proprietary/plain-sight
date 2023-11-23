@@ -68,6 +68,7 @@ class in_memory_video_output_t : public video_output_t {
     using rw_packet_callback_t = int (*)(void *, std::uint8_t *, int);
     AVIOContext *io_context_;
     std::uint8_t *buffer_;
+    std::int64_t offset_ = 0;
     std::vector<std::uint8_t> &sink_;
     // The buffer size is very important for performance. For protocols with
     // fixed blocksize it should be set to this blocksize. For others a typical
@@ -80,6 +81,9 @@ class in_memory_video_output_t : public video_output_t {
     // @see `avio_alloc_context()`
     static int write_packet(void *opaque, std::uint8_t *buf,
                             int buf_size) noexcept;
+
+    static std::int64_t seek(void* opaque, std::int64_t offset,
+                             int whence) noexcept;
 };
 
 class file_video_output_t : public video_output_t {

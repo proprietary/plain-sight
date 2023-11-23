@@ -20,19 +20,32 @@ void read_file(std::string &dst, const std::filesystem::path &path);
 
 std::string libav_error(int error);
 
-void AVCodecContextDeleter(AVCodecContext *p);
-
-struct avcodec_context_deleter_t {
-    void operator()(AVCodecContext *p) const;
+/// @brief RAII-style deleter for libav objects that take a pointer to a pointer.
+template<typename Deleter>
+class libav_2_star_deleter_t {
+public:
+  libav_2_star_deleter_t(Deleter fn) : fn_(fn) {}
+  void operator()(auto *p) const { fn_(&p); }
+private:
+  Deleter fn_;
 };
 
-struct av_packet_deleter_t {
-    void operator()(AVPacket *p) const;
+template<typename LibavType, auto Deleter>
+using libav_2_star_ptr_t = std::unique_ptr<LibavType, libav_2_star_deleter_t<decltype(Deleter)>>;
+
+/// @brief RAII-style deleter for libav objects that take a pointer.
+/// @tparam Deleter C-style function pointer to the "free" function for the libav object.
+template<typename Deleter>
+class libav_deleter_t {
+public:
+  libav_deleter_t(Deleter fn) : fn_(fn) {}
+  void operator()(auto *p) const { fn_(p); } 
+private:
+  Deleter fn_;
 };
 
-struct av_frame_deleter_t {
-    void operator()(AVFrame *p) const;
-};
+template<typename LibavType, auto Deleter>
+using libav_ptr_t = std::unique_ptr<LibavType, libav_deleter_t<decltype(Deleter)>>;
 
 } // namespace net_zelcon::plain_sight
 

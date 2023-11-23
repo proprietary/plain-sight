@@ -28,4 +28,23 @@ void decode_raw_data(std::vector<std::uint8_t> &dst,
     decoder.decode(dst, std::move(video_input));
 }
 
+void encode_file(std::filesystem::path dst, const std::vector<std::uint8_t>& src) {
+    auto qr_codes =
+        std::make_shared<std::vector<qrcodegen::QrCode>>(split_frames(src));
+    auto encoder = encoder_t::builder()
+                       .set_border_size(4)
+                       .set_fps(20)
+                       .set_scale(4)
+                       .set_video_format("mp4")
+                       .set_qr_codes(qr_codes)
+                       .build();
+    encoder.encode(std::make_unique<file_video_output_t>(dst));
+}
+
+void decode_file(std::vector<std::uint8_t>& dst, const std::filesystem::path& src) {
+    auto video_input = std::make_unique<file_video_input_t>(src);
+    decoder_t decoder;
+    decoder.decode(dst, std::move(video_input));
+}
+
 } // namespace net_zelcon::plain_sight

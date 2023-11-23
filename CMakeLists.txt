@@ -25,8 +25,6 @@ add_library(plain_sight)
 target_sources(
     plain_sight
     PUBLIC
-    plain_sight/video_generator.h
-    plain_sight/video_generator.cc
     plain_sight/qr_codes.h plain_sight/qr_codes.cc
     plain_sight/decoder.h plain_sight/decoder.cc
     plain_sight/encoder.h plain_sight/encoder.cc
@@ -56,13 +54,13 @@ set_target_properties(
 target_compile_options(
     plain_sight
     PRIVATE
-    #-Wall -Wextra -Werror -Wpedantic
-    #$<$<CONFIG:Debug>:-fsanitize=address,undefined -fno-omit-frame-pointer -g3>
+    -Wall -Wextra -Werror -Wpedantic
+    $<$<CONFIG:Debug>:-fsanitize=address,undefined -fno-omit-frame-pointer -g3>
 )
 target_link_options(
     plain_sight
     PUBLIC
-    #$<$<CONFIG:DEBUG>:-fsanitize=address,undefined -fno-omit-frame-pointer>
+    $<$<CONFIG:DEBUG>:-fsanitize=address,undefined -fno-omit-frame-pointer>
 )
 
 #######################
@@ -70,18 +68,6 @@ target_link_options(
 #######################
 
 enable_testing()
-add_executable(
-    video_generator_test
-    plain_sight/video_generator_test.cc
-)
-target_link_libraries(
-    video_generator_test
-    plain_sight
-    GTest::gtest_main
-    ${OpenCV_LIBS}
-    quirc
-    com_github_nayuki_QRCodeGenerator
-)
 add_executable(
     codec_test
     plain_sight/codec_test.cc
@@ -91,6 +77,16 @@ target_link_libraries(
     plain_sight
     GTest::gtest_main
 )
+add_executable(
+    qr_codes_test
+    plain_sight/qr_codes_test.cc
+)
+target_link_libraries(
+    qr_codes_test
+    plain_sight
+    GTest::gtest_main
+    com_github_nayuki_QRCodeGenerator
+)
 include(GoogleTest)
-gtest_discover_tests(video_generator_test)
 gtest_discover_tests(codec_test)
+gtest_discover_tests(qr_codes_test)

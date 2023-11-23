@@ -9,10 +9,29 @@
 
 using namespace net_zelcon::plain_sight;
 
-TEST(CodecTest, EndToEnd) {
+TEST(CodecEndToEndTest, Filesystem) {
     // load some file
     std::vector<std::uint8_t> some_file;
-    read_file(some_file, std::filesystem::path{"/usr/share/dict/words"});
+    read_file(some_file, std::filesystem::path{"/usr/include/errno.h"});
+    ASSERT_GT(some_file.size(), 0);
+    // encode it
+    std::filesystem::path encoded_path{"/tmp/output.mp4"};
+    encode_file(encoded_path, some_file);
+    ASSERT_TRUE(std::filesystem::exists(encoded_path));
+    ASSERT_GT(std::filesystem::file_size(encoded_path), 0);
+    // decode it
+    std::vector<std::uint8_t> decoded;
+    decode_file(decoded, encoded_path);
+    ASSERT_GT(decoded.size(), 0);
+    // check that it's the same
+    ASSERT_EQ(some_file.size(), decoded.size());
+    ASSERT_EQ(some_file, decoded);
+}
+
+TEST(CodecEndToEndTest, InMemory) {
+    // load some file
+    std::vector<std::uint8_t> some_file;
+    read_file(some_file, std::filesystem::path{"/usr/include/errno.h"});
     ASSERT_GT(some_file.size(), 0);
     // encode it
     std::vector<std::uint8_t> encoded;

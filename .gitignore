@@ -32,7 +32,8 @@
 *.app
 
 # CMake
-build/
+/build/
+/build_/
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles

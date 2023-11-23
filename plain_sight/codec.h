@@ -14,6 +14,12 @@ void encode_raw_data(std::vector<std::uint8_t> &dst,
 void decode_raw_data(std::vector<std::uint8_t> &dst,
                      std::span<std::uint8_t> src);
 
+void encode_file(std::filesystem::path dst,
+                 const std::vector<std::uint8_t> &src);
+
+void decode_file(std::vector<std::uint8_t> &dst,
+                 const std::filesystem::path &src);
+
 } // namespace net_zelcon::plain_sight
 
 #endif // _INCLUDE_NET_ZELCON_PLAIN_SIGHT_CODEC_H
