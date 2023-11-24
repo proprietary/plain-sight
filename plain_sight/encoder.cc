@@ -1,6 +1,7 @@
 #include "plain_sight/encoder.h"
 #include "plain_sight/util.h"
 
+#include <fmt/core.h>
 #include <algorithm>
 #include <functional>
 #include <glog/logging.h>
@@ -15,29 +16,70 @@ extern "C" {
 
 namespace net_zelcon::plain_sight {
 
-void draw_frame(AVFrame *const frame, const qrcodegen::QrCode &qr_code,
-                const int border_size, const int scale) {
-    CHECK(frame != nullptr);
-    CHECK_EQ(frame->width, frame->height);
+namespace {
+
+void write_frame(AVFormatContext *fmt_ctx, AVCodecContext *enc_ctx,
+                 AVFrame *frame, AVPacket *pkt) {
+    int err = avcodec_send_frame(enc_ctx, frame);
+    if (err < 0) {
+        LOG(FATAL) << "Could not send frame: " << libav_error(err);
+    }
+    while (err >= 0) {
+        err = avcodec_receive_packet(enc_ctx, pkt);
+        if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) {
+            return;
+        } else if (err < 0 && err != AVERROR_EOF) {
+            LOG(FATAL) << "Could not receive packet: " << libav_error(err);
+        } else if (err >= 0) {
+            // rescale output packet timestamp values from codec to stream
+            // timebase
+            av_packet_rescale_ts(pkt, enc_ctx->time_base,
+                                 fmt_ctx->streams[0]->time_base);
+            pkt->stream_index = fmt_ctx->streams[0]->index;
+            // write packet
+            err = av_interleaved_write_frame(fmt_ctx, pkt);
+            if (err < 0) {
+                LOG(FATAL) << "Could not write frame: " << libav_error(err);
+            }
+        }
+        av_packet_unref(pkt);
+    }
+}
+
+void prepare_frame(AVFrame *dst, const AVCodecContext *const codec_context) {
+    dst->width = codec_context->width;
+    dst->height = codec_context->height;
+    dst->format = codec_context->pix_fmt;
+    int err = av_frame_get_buffer(dst, 1);
+    CHECK(err >= 0) << "Could not allocate frame buffers: " << libav_error(err);
+}
+
+} // namespace
+
+void draw_QR_code(AVFrame *dst, const qrcodegen::QrCode &qr_code,
+                  const int border_size, const int scale) {
+    // TODO: Parallelize this. It is embarassingly parallelizable.
+    CHECK(dst != nullptr);
+    CHECK_EQ(dst->width, dst->height);
     const int computed_size = qr_code.getSize() * scale + border_size * 2;
-    CHECK_EQ(frame->width, computed_size)
-        << "frame->width: " << frame->width
+    CHECK_EQ(dst->width, computed_size)
+        << "dst->width: " << dst->width
         << " != computed_size: " << computed_size;
-    CHECK_EQ(frame->format, AV_PIX_FMT_YUV420P);
+    CHECK_EQ(dst->format, AV_PIX_FMT_YUV420P);
     // color channels: Y
     // See: https://en.wikipedia.org/wiki/YCbCr
-    for (int y = 0; y < frame->height; ++y) {
-        for (int x = 0; x < frame->width; ++x) {
+    for (int y = 0; y < dst->height; ++y) {
+        for (int x = 0; x < dst->width; ++x) {
             const bool is_border = x < border_size || y < border_size ||
-                                   x >= frame->width - border_size ||
-                                   y >= frame->height - border_size;
+                                   x >= dst->width - border_size ||
+                                   y >= dst->height - border_size;
             if (is_border) {
-                frame->data[0][y * frame->linesize[0] + x] = 255; // white
+                dst->data[0][y * dst->linesize[0] + x] = 255; // white
             } else {
                 // draw black or white pixel of the QR code
                 const int true_x = (x - border_size) / scale;
                 const int true_y = (y - border_size) / scale;
-                frame->data[0][y * frame->linesize[0] + x] =
+                dst->data[0][y * dst->linesize[0] + x] =
                     qr_code.getModule(true_x, true_y) ? 0
                                                       : 255; // black or white
             }
@@ -46,33 +88,66 @@ void draw_frame(AVFrame *const frame, const qrcodegen::QrCode &qr_code,
     // Color channels: U and V (Cb and Cr). These are always the same value
     // because the QR code is grayscale. Therefore it is easier to just set them
     // all to 128 in a contiguous, branch-free loop.
-    for (int y = 0; y < frame->height / 2; ++y) {
-        for (int x = 0; x < frame->width / 2; ++x) {
-            frame->data[1][y * frame->linesize[1] + x] = 128;
-            frame->data[2][y * frame->linesize[2] + x] = 128;
+    for (int y = 0; y < dst->height / 2; ++y) {
+        for (int x = 0; x < dst->width / 2; ++x) {
+            dst->data[1][y * dst->linesize[1] + x] = 128;
+            dst->data[2][y * dst->linesize[2] + x] = 128;
         }
     }
 }
 
+void draw_frame(AVCodecContext *const codec_context, AVFrame *const frame,
+                const qrcodegen::QrCode &qr_code, const int border_size,
+                const int scale) {
+    CHECK(frame != nullptr);
+    CHECK_EQ(frame->width, frame->height);
+    const int computed_size = qr_code.getSize() * scale + border_size * 2;
+    CHECK_EQ(frame->width, computed_size)
+        << "frame->width: " << frame->width
+        << " != computed_size: " << computed_size;
+    if (codec_context->pix_fmt != AV_PIX_FMT_YUV420P) {
+        // Convert from YUV420P because `draw_QR_code` only writes a YUV420P
+        // image.
+        libav_ptr_t<SwsContext, sws_freeContext> sws_context{
+            sws_getContext(frame->width, frame->height, AV_PIX_FMT_YUV420P,
+                           frame->width, frame->height, codec_context->pix_fmt,
+                           SWS_BILINEAR, nullptr, nullptr, nullptr),
+            sws_freeContext};
+        CHECK(sws_context) << "Failed to allocate SwsContext";
+        libav_ptr_t<AVFrame, av_frame_free> temp_frame{av_frame_alloc(),
+                                                       av_frame_free};
+        CHECK(temp_frame) << "Failed to allocate AVFrame";
+        prepare_frame(temp_frame.get(), codec_context);
+        DCHECK_EQ(temp_frame->width, frame->width);
+        DCHECK_EQ(temp_frame->height, frame->height);
+        DCHECK_EQ(static_cast<AVPixelFormat>(temp_frame->format),
+                  AV_PIX_FMT_YUV420P);
+        draw_QR_code(temp_frame.get(), qr_code, border_size, scale);
+        sws_scale(sws_context.get(), temp_frame->data, temp_frame->linesize, 0,
+                  frame->height, frame->data, frame->linesize);
+        // TODO: use some associated class object to obviate some of these
+        // allocations above
+    } else {
+        draw_QR_code(frame, qr_code, border_size, scale);
+    }
+}
+
 void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
-    std::unique_ptr<AVFormatContext, decltype(&avformat_free_context)>
-        format_context{avformat_alloc_context(), &avformat_free_context};
+    AVFormatContext* format_context = destination->format_context();
     CHECK(format_context) << "Failed to allocate AVFormatContext";
     format_context->oformat =
         av_guess_format(video_format_.c_str(), nullptr, nullptr);
     if (format_context->oformat == nullptr) {
         LOG(FATAL) << "No video format named " << std::quoted(video_format_);
     }
-    format_context->pb = destination->get_io_context();
-    CHECK(format_context->pb != nullptr);
-    AVStream *const stream = avformat_new_stream(format_context.get(), nullptr);
+    AVStream *const stream = avformat_new_stream(format_context, nullptr);
     CHECK(stream != nullptr);
     CHECK_EQ(stream, format_context->streams[0]);
     const AVCodec *const codec = avcodec_find_encoder(
         format_context->oformat->video_codec); // probably is AV_CODEC_ID_H264
     CHECK(codec != nullptr) << "Codec for " << std::quoted(video_format_)
                             << " not found on host system";
-    libav_2_star_ptr_t<AVCodecContext, avcodec_free_context> codec_context{
+    libav_ptr_t<AVCodecContext, avcodec_free_context> codec_context{
         avcodec_alloc_context3(codec), avcodec_free_context};
     CHECK(codec_context) << "Failed to allocate AVCodecContext";
     if (format_context->oformat->flags & AVFMT_GLOBALHEADER) {
@@ -99,97 +174,37 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
         LOG(FATAL) << "Could not initialize codec parameters:"
                    << libav_error(err);
     }
-    // stream->codecpar->extradata = codec_context->extradata;
-    // stream->codecpar->extradata_size = codec_context->extradata_size;
     //  write file header
-    err = avformat_write_header(format_context.get(), nullptr);
+    err = avformat_write_header(format_context, nullptr);
     if (err < 0) {
         LOG(FATAL) << "Could not write header:" << libav_error(err);
     }
     // allocate frame
-    libav_2_star_ptr_t<AVFrame, av_frame_free> frame{av_frame_alloc(),
-                                                     av_frame_free};
+    libav_ptr_t<AVFrame, av_frame_free> frame{av_frame_alloc(), av_frame_free};
     CHECK(frame) << "Failed to allocate AVFrame";
-    // set frame parameters
-    frame->width = codec_context->width;
-    frame->height = codec_context->height;
-    frame->format = codec_context->pix_fmt;
-    // allocate framebuffer
-    int sz = av_image_alloc(frame->data, frame->linesize, frame->width,
-                            frame->height, codec_context->pix_fmt, 1);
-    CHECK_GE(sz, 0) << "Failed to allocate framebuffer";
+    prepare_frame(frame.get(), codec_context.get());
     // allocate packet
-    libav_2_star_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
-                                                        av_packet_free};
-    const auto receive_packet = [](AVCodecContext *const codec_context,
-                                   AVPacket *const packet,
-                                   AVFormatContext *const format_context) {
-        int err;
-        while (true) {
-            err = avcodec_receive_packet(codec_context, packet);
-            if (err == AVERROR(EAGAIN)) {
-                break;
-            } else if (err < 0 && err != AVERROR_EOF) {
-                LOG(FATAL) << "Could not receive packet: " << libav_error(err);
-            } else if (err >= 0) {
-                av_packet_rescale_ts(packet, codec_context->time_base,
-                                    format_context->streams[0]->time_base);
-                // write packet
-                err = av_interleaved_write_frame(format_context, packet);
-                if (err < 0) {
-                    LOG(FATAL) << "Could not write frame: " << libav_error(err);
-                }
-            }
-            if (err == AVERROR_EOF)
-                break;
-            av_packet_unref(packet);
-        }
-    };
+    libav_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
+                                                 av_packet_free};
     int frame_counter = 0;
     for (const auto &qr_code : *qr_codes_) {
         // encode frame
-        draw_frame(frame.get(), qr_code, border_size_, scale_);
+        draw_frame(codec_context.get(), frame.get(), qr_code, border_size_,
+                   scale_);
         frame->pts = frame_counter;
         DLOG(INFO) << "Sending frame " << frame_counter << " / "
                    << qr_codes_->size() << " to encoder";
-        err = avcodec_send_frame(codec_context.get(), frame.get());
-        if (err < 0) {
-            LOG(FATAL) << "Could not send frame: " << libav_error(err);
-        }
-        receive_packet(codec_context.get(), packet.get(), format_context.get());
-        av_packet_unref(packet.get());
+        write_frame(format_context, codec_context.get(), frame.get(),
+                    packet.get());
         frame_counter++;
     }
     CHECK_EQ(static_cast<size_t>(frame_counter), qr_codes_->size());
     // Flush encoder with null flush packet, signaling end of the stream. If the
     // encoder still has packets buffered, it will return them.
-    err = avcodec_send_frame(codec_context.get(), nullptr);
-    if (err < 0) {
-        LOG(FATAL) << "Could not send frame: " << libav_error(err);
-    }
-    while (true) {
-        err = avcodec_receive_packet(codec_context.get(), packet.get());
-        if (err < 0 && err != AVERROR_EOF && err != AVERROR(EAGAIN)) {
-            LOG(FATAL) << "Could not receive packet: " << libav_error(err);
-        } else if (err >= 0) {
-            DLOG(INFO) << "Receive packet after flushing encoder";
-            av_packet_rescale_ts(packet.get(), codec_context->time_base,
-                                 format_context->streams[0]->time_base);
-            // write packet
-            err =
-                av_interleaved_write_frame(format_context.get(), packet.get());
-            if (err < 0) {
-                LOG(FATAL) << "Could not write frame: " << libav_error(err);
-            }
-        }
-        if (err == AVERROR_EOF) {
-            break;
-        }
-        av_packet_unref(packet.get());
-    }
-    // receive_packet(codec_context.get(), packet.get(), format_context.get());
+    write_frame(format_context, codec_context.get(), nullptr,
+                packet.get());
     //  Write trailer
-    err = av_write_trailer(format_context.get());
+    err = av_write_trailer(format_context);
     if (err < 0) {
         LOG(FATAL) << "Could not write trailer:" << libav_error(err);
     }
@@ -265,7 +280,17 @@ file_video_output_t::file_video_output_t(const std::filesystem::path &filename)
            std::filesystem::status(filename.parent_path()).permissions()) ==
           std::filesystem::perms::owner_write)
         << "Cannot write to " << std::quoted(filename.parent_path().string());
-    int err = avio_open(&io_context_, filename.c_str(), AVIO_FLAG_WRITE);
+    // deduce oformat from filename; may change this if accurate filenames are not available
+    int err = avformat_alloc_output_context2(&format_context_, nullptr, nullptr, filename_.c_str());
+    if (err < 0) {
+        LOG(ERROR) << "avformat_alloc_output_context2 failed: "
+                   << libav_error(err);
+        throw std::runtime_error{fmt::format("avformat_alloc_output_context2 "
+                                             "failed: {}",
+                                             libav_error(err))};
+    }
+    CHECK(format_context_ != nullptr);
+    err = avio_open(&format_context_->pb, filename.c_str(), AVIO_FLAG_WRITE);
     if (err < 0) {
         LOG(FATAL) << "avio_open failed: " << libav_error(err);
     }
@@ -273,11 +298,26 @@ file_video_output_t::file_video_output_t(const std::filesystem::path &filename)
 
 file_video_output_t::~file_video_output_t() noexcept {
     if (io_context_ != nullptr)
-        avio_close(io_context_);
+        avio_closep(&format_context_->pb);
+    avformat_free_context(format_context_);
 }
 
-auto file_video_output_t::get_io_context() const noexcept -> AVIOContext * {
-    return io_context_;
+auto file_video_output_t::format_context() -> AVFormatContext * {
+    return format_context_;
+}
+
+file_video_output_t::file_video_output_t(file_video_output_t&& src) noexcept {
+    this->filename_ = std::move(src.filename_);
+    this->io_context_ = src.io_context_;
+    src.io_context_ = nullptr;
+    this->format_context_ = src.format_context_;
+    src.format_context_ = nullptr;
+}
+
+file_video_output_t& file_video_output_t::operator=(file_video_output_t&& src) noexcept {
+    file_video_output_t temp{std::move(src)};
+    std::swap(*this, temp);
+    return *this;
 }
 
 in_memory_video_output_t::in_memory_video_output_t(
@@ -289,24 +329,26 @@ in_memory_video_output_t::in_memory_video_output_t(
     io_context_ = avio_alloc_context(buffer_, buffer_size_, write_flag, this,
                                      nullptr, &write_packet, &seek);
     CHECK(io_context_ != nullptr);
+    format_context_ = avformat_alloc_context();
+    format_context_->pb = io_context_;
+    format_context_->flags |= AVFMT_FLAG_CUSTOM_IO;
 }
 
 in_memory_video_output_t::~in_memory_video_output_t() noexcept {
     if (buffer_ != nullptr)
         av_free(buffer_);
-    if (io_context_ != nullptr)
-        avio_context_free(&io_context_);
+    avio_context_free(&format_context_->pb);
+    avformat_free_context(format_context_);
+}
+
+auto in_memory_video_output_t::format_context() -> AVFormatContext* {
+    return format_context_;
 }
 
 auto in_memory_video_output_t::get_video_contents() noexcept
     -> std::span<std::uint8_t> {
     std::span<std::uint8_t> s(sink_.data(), sink_.size());
     return s;
-}
-
-auto in_memory_video_output_t::get_io_context() const noexcept
-    -> AVIOContext * {
-    return io_context_;
 }
 
 int in_memory_video_output_t::write_packet(void *opaque, std::uint8_t *buf,
@@ -318,6 +360,9 @@ int in_memory_video_output_t::write_packet(void *opaque, std::uint8_t *buf,
     auto *const self = static_cast<in_memory_video_output_t *>(opaque);
     CHECK(self->buffer_ != nullptr);
     CHECK(self->io_context_ != nullptr);
+    if (buf_size <= 0) {
+        return AVERROR_EOF;
+    }
     std::copy_n(buf, buf_size, std::back_inserter(self->sink_));
     return buf_size;
 }

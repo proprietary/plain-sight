@@ -14,6 +14,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 #include <libavformat/avio.h>
 #include <libavutil/avutil.h>
 }
@@ -25,8 +26,9 @@ namespace net_zelcon::plain_sight {
 /// @param qr_code
 /// @param border_size Whitespace on each side of the QR code
 /// @param scale How many pixels per QR code module
-void draw_frame(AVFrame *const frame, const qrcodegen::QrCode &qr_code,
-                const int border_size, const int scale);
+void draw_frame(const AVCodecContext *const, AVFrame *,
+                const qrcodegen::QrCode &, const int border_size,
+                const int scale);
 
 class video_format_t {
   public:
@@ -53,20 +55,22 @@ class video_format_t {
 
 class video_output_t {
   public:
-    virtual auto get_io_context() const noexcept -> AVIOContext * = 0;
     virtual ~video_output_t() noexcept {}
+    virtual auto format_context() -> AVFormatContext * = 0;
 };
 
 class in_memory_video_output_t : public video_output_t {
   public:
     explicit in_memory_video_output_t(std::vector<std::uint8_t> &sink);
     auto get_video_contents() noexcept -> std::span<std::uint8_t>;
-    auto get_io_context() const noexcept -> AVIOContext * override;
     ~in_memory_video_output_t() noexcept override;
+    auto format_context() -> AVFormatContext * override;
+    auto io_context() -> AVIOContext *;
 
   private:
     using rw_packet_callback_t = int (*)(void *, std::uint8_t *, int);
     AVIOContext *io_context_;
+    AVFormatContext *format_context_;
     std::uint8_t *buffer_;
     std::int64_t offset_ = 0;
     std::vector<std::uint8_t> &sink_;
@@ -82,20 +86,39 @@ class in_memory_video_output_t : public video_output_t {
     static int write_packet(void *opaque, std::uint8_t *buf,
                             int buf_size) noexcept;
 
-    static std::int64_t seek(void* opaque, std::int64_t offset,
+    static std::int64_t seek(void *opaque, std::int64_t offset,
                              int whence) noexcept;
 };
 
 class file_video_output_t : public video_output_t {
   public:
     explicit file_video_output_t(const std::filesystem::path &filename);
-    auto get_io_context() const noexcept -> AVIOContext * override;
     auto get_file_contents() const noexcept -> std::span<std::uint8_t>;
     ~file_video_output_t() noexcept override;
+    auto format_context() -> AVFormatContext * override;
+
+    file_video_output_t() = delete;
+    file_video_output_t(file_video_output_t&&) noexcept;
+    file_video_output_t& operator=(file_video_output_t&&) noexcept;
+    file_video_output_t(const file_video_output_t&) = delete;
+    file_video_output_t& operator=(const file_video_output_t&) = delete;
 
   private:
     std::filesystem::path filename_;
-    AVIOContext *io_context_;
+    AVIOContext* io_context_;
+    AVFormatContext* format_context_;
+};
+
+class encoding_session_t {
+  public:
+    void encode();
+
+  private:
+    AVPacket *packet_;
+    AVStream *video_stream_;
+    int video_stream_index_;
+    AVCodecContext *codec_context_;
+    AVFormatContext *format_context_;
 };
 
 class encoder_t {

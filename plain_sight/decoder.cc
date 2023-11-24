@@ -28,17 +28,17 @@ struct image_buf_t {
 
 auto get_frame_pixels(image_buf_t &img, const AVFrame *frame) -> void {
     constexpr auto destination_format = AV_PIX_FMT_BGR8;
-    std::unique_ptr<SwsContext, decltype(&sws_freeContext)> sws_ctx{
+    libav_ptr_t<SwsContext, sws_freeContext> sws_ctx{
         sws_getContext(frame->width, frame->height,
                        static_cast<AVPixelFormat>(frame->format), frame->width,
                        frame->height, destination_format, SWS_BILINEAR, nullptr,
                        nullptr, nullptr),
-        &sws_freeContext};
+        sws_freeContext};
     if (!sws_ctx) {
         throw std::runtime_error{"Could not initialize sws context"};
     }
-    libav_2_star_ptr_t<AVFrame, av_frame_free> grayscale_frame{
-        av_frame_alloc(), av_frame_free};
+    libav_ptr_t<AVFrame, av_frame_free> grayscale_frame{av_frame_alloc(),
+                                                        av_frame_free};
     CHECK(grayscale_frame) << "Could not allocate bgr frame";
     int err =
         av_image_alloc(grayscale_frame->data, grayscale_frame->linesize,
@@ -93,21 +93,27 @@ auto find_video_stream(AVFormatContext *const format_context)
 } // namespace
 
 in_memory_video_input_t::in_memory_video_input_t(std::span<std::uint8_t> video)
-    : video_{video},
-      format_context_{avformat_alloc_context(), &avformat_free_context} {
+    : video_{video} {
     buffer_ = static_cast<std::uint8_t *>(av_malloc(buffer_size_));
     CHECK(buffer_ != nullptr) << "Could not allocate libav buffer";
     io_context_ = avio_alloc_context(buffer_, buffer_size_, 0, this,
                                      &read_packet, nullptr, &seek);
     CHECK(io_context_ != nullptr) << "Could not allocate libav io context";
+    format_context_ = avformat_alloc_context();
+    CHECK(format_context_ != nullptr) << "Could not allocate AVFormatContext";
     format_context_->pb = io_context_;
+    format_context_->flags |= AVFMT_FLAG_CUSTOM_IO;
+    int err = avformat_open_input(&format_context_, nullptr, nullptr, nullptr);
+    if (err < 0) {
+        LOG(ERROR) << "Could not open input file: " << libav_error(err);
+        throw std::runtime_error{libav_error(err)};
+    }
 }
 
 in_memory_video_input_t::~in_memory_video_input_t() noexcept {
     if (buffer_)
         av_free(buffer_);
-    if (io_context_)
-        avio_context_free(&io_context_);
+    avio_context_free(&io_context_);
 }
 
 int in_memory_video_input_t::read_packet(void *opaque, std::uint8_t *buf,
@@ -115,12 +121,12 @@ int in_memory_video_input_t::read_packet(void *opaque, std::uint8_t *buf,
     CHECK(opaque != nullptr) << "Opaque pointer is null. It should point to a "
                                 "`in_memory_video_input_t`.";
     auto *const self = static_cast<in_memory_video_input_t *>(opaque);
-    const auto bytes_left = self->video_.size() - self->offset_;
+    const int64_t bytes_left = self->video_.size() - self->offset_;
     if (bytes_left <= 0) {
         return AVERROR_EOF;
     }
-    const auto bytes_to_read =
-        std::min(bytes_left, static_cast<std::size_t>(buf_size));
+    const int64_t bytes_to_read =
+        std::min(bytes_left, static_cast<int64_t>(buf_size));
     std::copy(self->video_.begin() + self->offset_,
               self->video_.begin() + self->offset_ + bytes_to_read, buf);
     self->offset_ += bytes_to_read;
@@ -154,7 +160,7 @@ int64_t in_memory_video_input_t::seek(void *opaque, int64_t offset,
 auto in_memory_video_input_t::format_context() const -> AVFormatContext * {
     CHECK(format_context_) << "Attempted null pointer access on "
                               "`format_context_`. This should never happen.";
-    return format_context_.get();
+    return format_context_;
 }
 
 file_video_input_t::file_video_input_t(const std::filesystem::path &video_path)
@@ -200,7 +206,7 @@ void decoder_t::decode(std::vector<std::uint8_t> &dst,
     const auto [codec, codec_params, video_stream_idx] =
         find_video_stream(format_context);
     // allocate codec context
-    libav_2_star_ptr_t<AVCodecContext, avcodec_free_context> codec_context{
+    libav_ptr_t<AVCodecContext, avcodec_free_context> codec_context{
         avcodec_alloc_context3(codec), avcodec_free_context};
     CHECK(codec_context) << "Could not allocate codec context";
     err = avcodec_parameters_to_context(codec_context.get(), codec_params);
@@ -217,10 +223,9 @@ void decoder_t::decode(std::vector<std::uint8_t> &dst,
         throw std::runtime_error{
             fmt::format("Could not open codec: {}", libav_error(err))};
     }
-    libav_2_star_ptr_t<AVFrame, av_frame_free> frame{av_frame_alloc(),
-                                                     av_frame_free};
+    libav_ptr_t<AVFrame, av_frame_free> frame{av_frame_alloc(), av_frame_free};
     CHECK(frame) << "Could not allocate frame";
-    libav_2_star_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
+    libav_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
                                                  av_packet_free};
     CHECK(packet) << "Could not allocate packet";
     std::unique_ptr<qr_code_decoder_t> qr_code_decoder{nullptr};
@@ -229,8 +234,7 @@ void decoder_t::decode(std::vector<std::uint8_t> &dst,
     err = 0;
     while (err >= 0) {
         err = av_read_frame(format_context, packet.get());
-        if (err >= 0 &&
-            packet->stream_index != video_stream_idx) {
+        if (err >= 0 && packet->stream_index != video_stream_idx) {
             continue;
         }
         if (err < 0) {
