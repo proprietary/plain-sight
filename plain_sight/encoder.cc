@@ -1,8 +1,8 @@
 #include "plain_sight/encoder.h"
 #include "plain_sight/util.h"
 
-#include <fmt/core.h>
 #include <algorithm>
+#include <fmt/core.h>
 #include <functional>
 #include <glog/logging.h>
 
@@ -133,7 +133,7 @@ void draw_frame(AVCodecContext *const codec_context, AVFrame *const frame,
 }
 
 void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
-    AVFormatContext* format_context = destination->format_context();
+    AVFormatContext *format_context = destination->format_context();
     CHECK(format_context) << "Failed to allocate AVFormatContext";
     format_context->oformat =
         av_guess_format(video_format_.c_str(), nullptr, nullptr);
@@ -186,7 +186,7 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
     // allocate packet
     libav_ptr_t<AVPacket, av_packet_free> packet{av_packet_alloc(),
                                                  av_packet_free};
-    int frame_counter = 0;
+    int frame_counter = 1;
     for (const auto &qr_code : *qr_codes_) {
         // encode frame
         draw_frame(codec_context.get(), frame.get(), qr_code, border_size_,
@@ -198,11 +198,10 @@ void encoder_t::encode(std::unique_ptr<video_output_t> destination) {
                     packet.get());
         frame_counter++;
     }
-    CHECK_EQ(static_cast<size_t>(frame_counter), qr_codes_->size());
+    CHECK_EQ(static_cast<size_t>(frame_counter), qr_codes_->size() + 1);
     // Flush encoder with null flush packet, signaling end of the stream. If the
     // encoder still has packets buffered, it will return them.
-    write_frame(format_context, codec_context.get(), nullptr,
-                packet.get());
+    write_frame(format_context, codec_context.get(), nullptr, packet.get());
     //  Write trailer
     err = av_write_trailer(format_context);
     if (err < 0) {
@@ -280,8 +279,10 @@ file_video_output_t::file_video_output_t(const std::filesystem::path &filename)
            std::filesystem::status(filename.parent_path()).permissions()) ==
           std::filesystem::perms::owner_write)
         << "Cannot write to " << std::quoted(filename.parent_path().string());
-    // deduce oformat from filename; may change this if accurate filenames are not available
-    int err = avformat_alloc_output_context2(&format_context_, nullptr, nullptr, filename_.c_str());
+    // deduce oformat from filename; may change this if accurate filenames are
+    // not available
+    int err = avformat_alloc_output_context2(&format_context_, nullptr, nullptr,
+                                             filename_.c_str());
     if (err < 0) {
         LOG(ERROR) << "avformat_alloc_output_context2 failed: "
                    << libav_error(err);
@@ -306,7 +307,7 @@ auto file_video_output_t::format_context() -> AVFormatContext * {
     return format_context_;
 }
 
-file_video_output_t::file_video_output_t(file_video_output_t&& src) noexcept {
+file_video_output_t::file_video_output_t(file_video_output_t &&src) noexcept {
     this->filename_ = std::move(src.filename_);
     this->io_context_ = src.io_context_;
     src.io_context_ = nullptr;
@@ -314,7 +315,8 @@ file_video_output_t::file_video_output_t(file_video_output_t&& src) noexcept {
     src.format_context_ = nullptr;
 }
 
-file_video_output_t& file_video_output_t::operator=(file_video_output_t&& src) noexcept {
+file_video_output_t &
+file_video_output_t::operator=(file_video_output_t &&src) noexcept {
     file_video_output_t temp{std::move(src)};
     std::swap(*this, temp);
     return *this;
@@ -323,11 +325,10 @@ file_video_output_t& file_video_output_t::operator=(file_video_output_t&& src) n
 in_memory_video_output_t::in_memory_video_output_t(
     std::vector<std::uint8_t> &sink)
     : sink_{sink} {
-    buffer_ = static_cast<std::uint8_t *>(av_malloc(buffer_size_));
-    CHECK(buffer_ != nullptr);
-    constexpr bool write_flag = 1;
-    io_context_ = avio_alloc_context(buffer_, buffer_size_, write_flag, this,
-                                     nullptr, &write_packet, &seek);
+    std::uint8_t *buffer = static_cast<std::uint8_t *>(av_malloc(buffer_size_));
+    CHECK(buffer != nullptr) << "Failed to allocate AVIO buffer";
+    io_context_ = avio_alloc_context(buffer, buffer_size_, AVIO_FLAG_WRITE,
+                                     this, nullptr, &write_packet, &seek);
     CHECK(io_context_ != nullptr);
     format_context_ = avformat_alloc_context();
     format_context_->pb = io_context_;
@@ -335,13 +336,12 @@ in_memory_video_output_t::in_memory_video_output_t(
 }
 
 in_memory_video_output_t::~in_memory_video_output_t() noexcept {
-    if (buffer_ != nullptr)
-        av_free(buffer_);
-    avio_context_free(&format_context_->pb);
+    av_free(io_context_->buffer);
+    avio_context_free(&io_context_);
     avformat_free_context(format_context_);
 }
 
-auto in_memory_video_output_t::format_context() -> AVFormatContext* {
+auto in_memory_video_output_t::format_context() -> AVFormatContext * {
     return format_context_;
 }
 
@@ -358,36 +358,41 @@ int in_memory_video_output_t::write_packet(void *opaque, std::uint8_t *buf,
     CHECK(buf != nullptr);
     CHECK(opaque != nullptr);
     auto *const self = static_cast<in_memory_video_output_t *>(opaque);
-    CHECK(self->buffer_ != nullptr);
-    CHECK(self->io_context_ != nullptr);
     if (buf_size <= 0) {
         return AVERROR_EOF;
     }
-    std::copy_n(buf, buf_size, std::back_inserter(self->sink_));
+    DLOG(INFO) << "writing packet at offset " << self->offset_ << " size "
+               << buf_size << " in in_memory_video_output_t";
+    if (self->offset_ + buf_size > static_cast<int64_t>(self->sink_.size())) {
+        self->sink_.resize(self->offset_ + buf_size, 0);
+    }
+    std::copy_n(buf, buf_size, self->sink_.begin() + self->offset_);
+    self->offset_ += buf_size;
+    CHECK_LE(self->offset_, static_cast<int64_t>(self->sink_.size()));
     return buf_size;
 }
 
 std::int64_t in_memory_video_output_t::seek(void *opaque, std::int64_t offset,
                                             int whence) noexcept {
+    DLOG(INFO) << "Seeking to offset " << offset << " whence " << whence
+               << " in in_memory_video_output_t";
     // A function for seeking to specified byte position, may be NULL.
     CHECK(opaque != nullptr);
     auto *const self = static_cast<in_memory_video_output_t *>(opaque);
-    CHECK(self->buffer_ != nullptr);
-    CHECK(self->io_context_ != nullptr);
+    if (offset < 0) {
+        LOG(ERROR) << "Invalid offset: " << offset;
+        return AVERROR(EINVAL);
+    }
     switch (whence) {
     case SEEK_SET:
         self->offset_ = offset;
         break;
     case SEEK_CUR:
-        self->offset_ += offset;
-        break;
     case SEEK_END:
-        self->offset_ = self->sink_.size() + offset;
-        break;
     case AVSEEK_SIZE:
-        return self->sink_.size();
     default:
-        LOG(FATAL) << "Invalid whence: " << whence;
+        LOG(ERROR) << "Invalid whence: " << whence;
+        return AVERROR(ENOSYS);
     }
     return self->offset_;
 }

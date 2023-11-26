@@ -71,7 +71,6 @@ class in_memory_video_output_t : public video_output_t {
     using rw_packet_callback_t = int (*)(void *, std::uint8_t *, int);
     AVIOContext *io_context_;
     AVFormatContext *format_context_;
-    std::uint8_t *buffer_;
     std::int64_t offset_ = 0;
     std::vector<std::uint8_t> &sink_;
     // The buffer size is very important for performance. For protocols with
@@ -98,15 +97,15 @@ class file_video_output_t : public video_output_t {
     auto format_context() -> AVFormatContext * override;
 
     file_video_output_t() = delete;
-    file_video_output_t(file_video_output_t&&) noexcept;
-    file_video_output_t& operator=(file_video_output_t&&) noexcept;
-    file_video_output_t(const file_video_output_t&) = delete;
-    file_video_output_t& operator=(const file_video_output_t&) = delete;
+    file_video_output_t(file_video_output_t &&) noexcept;
+    file_video_output_t &operator=(file_video_output_t &&) noexcept;
+    file_video_output_t(const file_video_output_t &) = delete;
+    file_video_output_t &operator=(const file_video_output_t &) = delete;
 
   private:
     std::filesystem::path filename_;
-    AVIOContext* io_context_;
-    AVFormatContext* format_context_;
+    AVIOContext *io_context_;
+    AVFormatContext *format_context_;
 };
 
 class encoding_session_t {

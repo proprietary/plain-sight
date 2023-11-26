@@ -41,11 +41,11 @@ class in_memory_video_input_t : public video_input_t {
 
   private:
     const std::span<std::uint8_t> video_;
-    size_t offset_ = 0;
+    int64_t offset_ = 0;
     AVIOContext *io_context_;
     std::uint8_t *buffer_;
     constexpr static std::size_t buffer_size_ = 4096;
-    AVFormatContext* format_context_;
+    AVFormatContext *format_context_;
 
     /// @brief Callback for `avio_alloc_context`.
     /// @details This is a static function because it is a callback for a C API.

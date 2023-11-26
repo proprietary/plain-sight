@@ -103,16 +103,17 @@ in_memory_video_input_t::in_memory_video_input_t(std::span<std::uint8_t> video)
     CHECK(format_context_ != nullptr) << "Could not allocate AVFormatContext";
     format_context_->pb = io_context_;
     format_context_->flags |= AVFMT_FLAG_CUSTOM_IO;
-    int err = avformat_open_input(&format_context_, nullptr, nullptr, nullptr);
+    int err = avformat_open_input(&format_context_, "", nullptr, nullptr);
     if (err < 0) {
-        LOG(ERROR) << "Could not open input file: " << libav_error(err);
+        LOG(ERROR) << "Could not open input data buffer (" << video_.size()
+                   << " bytes): " << libav_error(err);
         throw std::runtime_error{libav_error(err)};
     }
 }
 
 in_memory_video_input_t::~in_memory_video_input_t() noexcept {
-    if (buffer_)
-        av_free(buffer_);
+    av_free(io_context_->buffer);
+    avformat_close_input(&format_context_);
     avio_context_free(&io_context_);
 }
 
@@ -138,23 +139,37 @@ int64_t in_memory_video_input_t::seek(void *opaque, int64_t offset,
     CHECK(opaque != nullptr) << "Opaque pointer is null. It should point to a "
                                 "`in_memory_video_input_t`.";
     auto *const self = static_cast<in_memory_video_input_t *>(opaque);
+    CHECK(self->video_.size() <= std::numeric_limits<int64_t>::max());
+    const auto video_size = static_cast<int64_t>(self->video_.size());
     switch (whence) {
     case SEEK_SET:
+        if (offset < 0 || offset > video_size) {
+            LOG(ERROR) << "Invalid offset value: " << offset;
+            return AVERROR(EINVAL);
+        }
         self->offset_ = offset;
         break;
     case SEEK_CUR:
+        if (self->offset_ + offset < 0 || self->offset_ + offset > video_size) {
+            LOG(ERROR) << "Invalid offset value: " << offset;
+            return AVERROR(EINVAL);
+        }
         self->offset_ += offset;
         break;
     case SEEK_END:
+        if (offset + video_size < 0 || video_size + offset > video_size) {
+            LOG(ERROR) << "Invalid offset value: " << offset;
+            return AVERROR(EINVAL);
+        }
         self->offset_ = self->video_.size() + offset;
         break;
     case AVSEEK_SIZE:
-        return self->video_.size();
+        return video_size;
     default:
         LOG(ERROR) << "Invalid whence value: " << whence;
-        return -1;
+        return AVERROR(EINVAL);
     }
-    return 0;
+    return self->offset_;
 }
 
 auto in_memory_video_input_t::format_context() const -> AVFormatContext * {

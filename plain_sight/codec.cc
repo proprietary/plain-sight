@@ -13,7 +13,7 @@ void encode_raw_data(std::vector<std::uint8_t> &dst,
         std::make_shared<std::vector<qrcodegen::QrCode>>(split_frames(src));
     auto encoder = encoder_t::builder()
                        .set_border_size(4)
-                       .set_fps(20)
+                       .set_fps(30)
                        .set_scale(4)
                        .set_video_format("mp4")
                        .set_qr_codes(qr_codes)
@@ -34,7 +34,7 @@ void encode_file(std::filesystem::path dst,
         std::make_shared<std::vector<qrcodegen::QrCode>>(split_frames(src));
     auto encoder = encoder_t::builder()
                        .set_border_size(4)
-                       .set_fps(20)
+                       .set_fps(30)
                        .set_scale(4)
                        .set_video_format("mp4")
                        .set_qr_codes(qr_codes)
